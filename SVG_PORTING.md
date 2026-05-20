@@ -572,20 +572,53 @@ Two fixes applied during user-guide review (2026-05-20):
 
 Both fixes pass 26/26 of the regression suite.
 
+### @Diag connector dropout (fixed)
+
+The thin connector strokes (`stroke-width=0.48`) emitted by
+`ldiagdosegpath`/`ldiaglinkend` were silently dropping out across late
+pages of the user-guide build.  Root cause was two-fold:
+
+1. **`LoutSetTexture` and `LoutMakeTexture` were complete no-ops** but
+   PS-side they consume operands (1 and 11 respectively, with
+   `LoutMakeTexture` also producing 1).  Each `@Diag` arrowhead body
+   invokes `null LoutSetTexture` as part of its paint procedure --
+   leaving the `null` argument stranded on the operand stack.  Across
+   ~2700 @Graphic invocations the leftover operands accumulated and
+   eventually drifted the stack enough that `ldiagnodeend`/`ldiaglinkend`
+   were popping the wrong values for `<linewidth>` and `<linestyle>`,
+   causing the connector path to be malformed or its `setlinewidth` to
+   pick up the wrong number.
+
+2. **Dict pool leak via tag-dicts**.  `ldiagpushtagdict`/`ldiagpoptagdict`
+   create a fresh dict per node/link/label.  When `ldiagpoptagdict` pops
+   the dict via the `currentdict end dup /ldiagtagdict known { exit } if`
+   loop, the dict briefly sits on the operand stack via `dup` before
+   being discarded with `pop` after the loop.  At the moment of the
+   `end`, `svg_dict_try_free_anonymous` saw the operand-stack reference
+   and (correctly) refused to reclaim the slot -- but it never gets a
+   second chance, so each tag-dict permanently consumed a pool slot.
+   After ~60 @Diag instances the 1024-slot pool was exhausted and
+   subsequent `dict` allocations failed, so any code path needing a
+   fresh dict (notably `ldiagdosegpath`'s `12 dict begin`) silently
+   degraded into a state where the connector path was never built.
+
+Fix: added a proper mark-and-sweep `svg_dict_gc_sweep` invoked at the
+end of every `svg_ps_run`.  Roots are the dict stack and the operand
+stack; unreachable in-use pool slots get reclaimed.  Combined with
+making `LoutSetTexture`/`LoutMakeTexture` pop their operands, the
+user-guide build now emits ~2200 `stroke-width=0.48` paths (vs. ~80
+before the fix) and pool_used stays under 20 indefinitely.
+
 ### Remaining known issues
 
-- @Diag connector lines (thin paths drawn via `ldiagdosegpath`/`ldiaglinkend`)
-  still drop out on several user-guide pages (e.g. labels 195, 200, 205,
-  210).  Reproducing the failure outside the full user-guide build is
-  difficult: isolated minimal `.lt` inputs with the same `@SyntaxDiag`
-  bodies render their connectors correctly.  The bug appears to be a
-  cross-document state leak in the PS interpreter; node outlines and
-  arrowheads (paths emitted at `stroke-width=0.96`) still render fine,
-  but the thinner connector paths (`stroke-width=0.48`) go missing on
-  the affected pages.  Needs more investigation; likely a corrupted
-  dict slot, CTM stack imbalance, or path accumulator that survives an
-  earlier @Graphic block.
-- Texture patterns (`LoutMakeTexture`/`LoutSetTexture` no-ops):
-  `@Box paint{black} texture{brickwork}` collapses to a solid black
-  rectangle in SVG.  Documented design choice; needs `<pattern>`
-  emission in `<defs>` to fix.
+- Texture patterns (`LoutMakeTexture`/`LoutSetTexture` now pop operands
+  but still ignore the texture body): `@Box paint{black} texture{brickwork}`
+  collapses to a solid black rectangle in SVG.  Documented design
+  choice; needs `<pattern>` emission in `<defs>` to fix.  The texture
+  body is itself a PostScript procedure passed to `LoutMakeTexture` so
+  a clean implementation would either special-case the @TextureCommand
+  names recognised by `coltex` (`brickwork`, `honeycomb`, `striped`,
+  `grid`, `dotted`, `chessboard`, `triangular`, `string`) and emit
+  prebuilt `<pattern>` elements, or run the texture procedure through
+  the interpreter while redirecting its draw ops into a per-pattern
+  buffer.

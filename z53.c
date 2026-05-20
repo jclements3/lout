@@ -1299,6 +1299,84 @@ static void svg_dict_try_free_anonymous(int did, struct svg_ps_state *s)
   if( svg_dict_pool_used > 0 ) svg_dict_pool_used--;
 }
 
+/* Mark a dict and (transitively) any dicts it references via its slot       */
+/* values.  Used by svg_dict_gc_sweep to compute reachability from the dict  */
+/* stack and the operand stack.                                              */
+static void svg_dict_mark(int did, char *marks)
+{
+  int j;
+  svg_dict *d;
+  if( did < 0 || did >= SVG_PS_DICT_POOL ) return;
+  if( marks[did] ) return;
+  if( !svg_dict_pool[did].in_use ) return;
+  marks[did] = 1;
+  d = &svg_dict_pool[did];
+  for( j = 0; j < SVG_PS_DICT_ENTRIES; j++ )
+  {
+    int k;
+    const svg_value *v;
+    if( !d->entries[j].used ) continue;
+    v = &d->entries[j].value;
+    if( v->kind == SVG_VK_DICT )
+      svg_dict_mark(v->dict_id, marks);
+    /* nested array/proc may capture dicts */
+    if( (v->kind == SVG_VK_ARRAY || v->kind == SVG_VK_PROC) && v->items != NULL )
+    {
+      for( k = 0; k < v->nitems; k++ )
+        if( v->items[k].kind == SVG_VK_DICT )
+          svg_dict_mark(v->items[k].dict_id, marks);
+    }
+  }
+}
+
+static void svg_value_mark(const svg_value *v, char *marks)
+{
+  int k;
+  if( v == NULL ) return;
+  if( v->kind == SVG_VK_DICT )
+    svg_dict_mark(v->dict_id, marks);
+  else if( (v->kind == SVG_VK_ARRAY || v->kind == SVG_VK_PROC) &&
+           v->items != NULL )
+  {
+    for( k = 0; k < v->nitems; k++ )
+      svg_value_mark(&v->items[k], marks);
+  }
+}
+
+/* Reclaim dict pool slots that are unreachable from the dict stack and the   */
+/* current operand stack.  Called at the end of each svg_ps_run invocation:  */
+/* without this the @Diag/@SyntaxDiag prologue's heavy use of tag-dict       */
+/* push/pop idioms (where the popped dict briefly sits on the operand stack  */
+/* before being discarded) leaks one or more pool slots per node/link.  The */
+/* persistent svg_dict_try_free_anonymous handles only the on-end case; this */
+/* sweep catches dicts that became garbage during the run but weren't        */
+/* freeable at the moment of `end`.                                           */
+static void svg_dict_gc_sweep(struct svg_ps_state *s)
+{
+  static char marks[SVG_PS_DICT_POOL];
+  int i;
+  for( i = 0; i < SVG_PS_DICT_POOL; i++ )
+    marks[i] = 0;
+  /* Roots: all dicts on the dict stack */
+  for( i = 0; i <= svg_dict_top; i++ )
+    svg_dict_mark(svg_dict_stack[i], marks);
+  /* Roots: anything reachable from the operand stack */
+  if( s != NULL )
+  {
+    for( i = 0; i < s->top; i++ )
+      svg_value_mark(&s->stack[i], marks);
+  }
+  /* Sweep: anything unmarked but in_use is garbage */
+  for( i = 1; i < SVG_PS_DICT_POOL; i++ )
+  {
+    if( svg_dict_pool[i].in_use && !marks[i] )
+    {
+      svg_dict_pool[i].in_use = 0;
+      if( svg_dict_pool_used > 0 ) svg_dict_pool_used--;
+    }
+  }
+}
+
 static void svg_ps_init(svg_ps_state *s)
 {
   s->top = 0;
@@ -2745,11 +2823,33 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     return 1;
   }
   if( strcmp(name, "LoutTextureSolid") == 0 ||
-      strcmp(name, "LoutMakeTexture") == 0 ||
-      strcmp(name, "LoutSetTexture") == 0 ||
       strcmp(name, "save_cp") == 0 ||
       strcmp(name, "restore_cp") == 0 )
     return 1;
+  if( strcmp(name, "LoutSetTexture") == 0 )
+  {
+    /* PS: { pop } (no-texture build) or texture-stack manipulation.  Both    */
+    /* variants consume exactly one operand.  An earlier no-op handler left   */
+    /* the argument on the stack -- across many @Graphic invocations the     */
+    /* leftover operand accumulated and eventually masked the connector     */
+    /* outline/dashlength arguments of ldiagnodeend/ldiaglinkend, dropping  */
+    /* the thin (0.48) connector strokes in late pages of the user guide.   */
+    (void) svg_ps_pop_value(s);
+    return 1;
+  }
+  if( strcmp(name, "LoutMakeTexture") == 0 )
+  {
+    /* PS: consumes 11 operands and pushes one (a pattern or null).          */
+    int i;
+    svg_value out;
+    for( i = 0; i < 11; i++ )
+      (void) svg_ps_pop_value(s);
+    out.kind = SVG_VK_NULL;
+    out.num = 0.0; out.name = NULL; out.items = NULL; out.nitems = 0;
+    out.dict_id = 0;
+    svg_ps_push(s, &out);
+    return 1;
+  }
 
   /* dictionary ops */
   if( strcmp(name, "dict") == 0 )
@@ -3668,6 +3768,12 @@ static void svg_ps_run(const char *buf, int n, svg_ps_state *s)
 
   if( s->had_geom )
     svg_ps_emit_path(s, 1, 0);
+
+  /* Sweep the dict pool to reclaim anonymous dicts that became unreachable  */
+  /* during this run (e.g., tag-dicts that ldiagpoptagdict popped while a    */
+  /* transient operand-stack reference prevented svg_dict_try_free_anonymous */
+  /* from reclaiming them at the moment of `end`).                            */
+  svg_dict_gc_sweep(s);
 }
 
 
