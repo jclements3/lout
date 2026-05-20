@@ -1,0 +1,131 @@
+###########################################################################
+#                                                                         #
+#   svgmacros                                                             #
+#                                                                         #
+#   Passthrough macros for the SVG back-end (z53.c).                      #
+#                                                                         #
+#   These macros are intended for use by Markdown -> Lout converters      #
+#   (e.g. mdlout) that want to emit raw HTML/SVG fragments which are      #
+#   then rendered client-side by JavaScript libraries such as KaTeX       #
+#   (LaTeX math) and abcjs (ABC music notation).                          #
+#                                                                         #
+#   When the active back-end is SVG, each macro injects a raw markup      #
+#   fragment via @Graphic so that the SVG back-end's PrintGraphicObject   #
+#   pass copies it verbatim into the output.                              #
+#                                                                         #
+#   When the active back-end is PostScript / PDF / PlainText, the macro   #
+#   falls back to a plain rendering (the raw content as words, or a       #
+#   placeholder marker) so source files remain renderable to print.       #
+#                                                                         #
+#   This file is opt-in.  Users include it with:                          #
+#                                                                         #
+#       @SysInclude { doc }                                               #
+#       @SysInclude { svgmacros }                                         #
+#                                                                         #
+#   It does NOT need to be included automatically by doc/book/report/     #
+#   slides; keeping it opt-in avoids polluting the symbol table for       #
+#   users who don't need these passthroughs.                              #
+#                                                                         #
+###########################################################################
+
+
+###########################################################################
+#                                                                         #
+#   @Math { LATEX-SOURCE }                                                #
+#                                                                         #
+#   In SVG mode: emits                                                    #
+#       <foreignObject><span class="math">LATEX-SOURCE</span>             #
+#       </foreignObject>                                                  #
+#   so that a downstream JS layer (KaTeX) can typeset the math.           #
+#   In any other back-end: emits the source as a plain word block.        #
+#                                                                         #
+###########################################################################
+
+def @Math right @Body
+{
+    @BackEnd @Case {
+        SVG @Yield {
+            { "<foreignObject><span class=" "\"" "math" "\"" ">"
+              @Body
+              "</span></foreignObject>" } @Graphic {}
+        }
+        else @Yield {
+            @Body
+        }
+    }
+}
+
+
+###########################################################################
+#                                                                         #
+#   @ABC { ABC-SOURCE }                                                   #
+#                                                                         #
+#   In SVG mode: emits                                                    #
+#       <foreignObject><div class="abc-music" data-abc="ABC-SOURCE">      #
+#       </div></foreignObject>                                            #
+#   so that a downstream JS layer (abcjs) can render the score.           #
+#   In any other back-end: emits the source verbatim as a code block.     #
+#                                                                         #
+###########################################################################
+
+def @ABC right @Body
+{
+    @BackEnd @Case {
+        SVG @Yield {
+            { "<foreignObject><div class=" "\"" "abc-music" "\""
+              " data-abc=" "\"" @Body "\"" "></div></foreignObject>"
+            } @Graphic {}
+        }
+        else @Yield {
+            "[ABC music notation:" @Body "]"
+        }
+    }
+}
+
+
+###########################################################################
+#                                                                         #
+#   @SVG { SVG-MARKUP }                                                   #
+#                                                                         #
+#   In SVG mode: emits the body verbatim.  The body is assumed to be      #
+#   well-formed SVG markup (or other XML/HTML the consumer expects).      #
+#   In any other back-end: emits a placeholder note.                      #
+#                                                                         #
+###########################################################################
+
+def @SVG right @Body
+{
+    @BackEnd @Case {
+        SVG @Yield {
+            { @Body } @Graphic {}
+        }
+        else @Yield {
+            "[inline SVG omitted in non-SVG back-end]"
+        }
+    }
+}
+
+
+###########################################################################
+#                                                                         #
+#   @SVGFile { path }                                                     #
+#                                                                         #
+#   In SVG mode: reads the file at the given path and inlines its         #
+#   contents (expected to be an <svg>...</svg> root element).  We use     #
+#   @IncludeGraphicFile, which causes the back-end PrintGraphicInclude    #
+#   callback to copy the file verbatim to the output.                     #
+#   In any other back-end: emits a placeholder note.                      #
+#                                                                         #
+###########################################################################
+
+def @SVGFile right @Path
+{
+    @BackEnd @Case {
+        SVG @Yield {
+            @IncludeGraphic @Path {}
+        }
+        else @Yield {
+            "[SVG file " @Path " omitted in non-SVG back-end]"
+        }
+    }
+}

@@ -62,6 +62,7 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield { { ps gsave // grestore } @Graphic x }
+	    	SVG        @Yield { { ps gsave // grestore } @Graphic x }
 	    	PDF        @Yield { }
 	    }
     }
@@ -69,6 +70,7 @@ def @Fig
     def in precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "in" }
+	    	SVG        @Yield { x "in" }
 	    	PDF        @Yield { "__mul(__in, "x")" }
 	    }
 	}
@@ -76,6 +78,7 @@ def @Fig
     def cm precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "cm" }
+	    	SVG        @Yield { x "cm" }
 	    	PDF        @Yield { "__mul(__cm, "x")" }
 	    }
 	}
@@ -83,6 +86,7 @@ def @Fig
     def pt precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "pt" }
+	    	SVG        @Yield { x "pt" }
 	    	PDF        @Yield { "__mul(__pt, "x")" }
 	    }
 	}
@@ -90,6 +94,7 @@ def @Fig
     def em precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "em" }
+	    	SVG        @Yield { x "em" }
 	    	PDF        @Yield { "__mul(__em, "x")" }
 	    }
 	}
@@ -97,6 +102,7 @@ def @Fig
     def sp precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "sp" }
+	    	SVG        @Yield { x "sp" }
 	    	PDF        @Yield { "__mul(__louts, "x")" }
 	    }
 	}
@@ -104,6 +110,7 @@ def @Fig
     def vs precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "vs" }
+	    	SVG        @Yield { x "vs" }
 	    	PDF        @Yield { "__mul(__loutv, "x")" }
 	    }
 	}
@@ -111,6 +118,7 @@ def @Fig
     def ft precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "ft" }
+	    	SVG        @Yield { x "ft" }
 	    	PDF        @Yield { "__mul(__loutf, "x")" }
 	    }
 	}
@@ -118,6 +126,7 @@ def @Fig
     def dg precedence 39 left x {
 	    @BackEnd @Case {
 	    	PostScript @Yield { x "dg" }
+	    	SVG        @Yield { x "dg" }
 	    	PDF        @Yield { }
 	    }
 	}
@@ -129,6 +138,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				0 0 length angle "lfigatangle"
+			}
+			SVG        @Yield {
 				0 0 length angle "lfigatangle"
 			}
 			PDF @Yield {
@@ -143,6 +155,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				point length "lfigpmul"
+			}
+			SVG        @Yield {
 				point length "lfigpmul"
 			}
 			PDF @Yield {
@@ -160,6 +175,9 @@ def @Fig
 	    	PostScript @Yield {
 				x y "lfigpadd"
 			}
+			SVG        @Yield {
+				x y "lfigpadd"
+			}
 			PDF @Yield {
 			}
 		}
@@ -173,6 +191,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				y x "lfigpsub"
+			}
+			SVG        @Yield {
 				y x "lfigpsub"
 			}
 			PDF @Yield {
@@ -189,6 +210,9 @@ def @Fig
 	    	PostScript @Yield {
 				x y "lfigpmax"
 			}
+			SVG        @Yield {
+				x y "lfigpmax"
+			}
 			PDF @Yield {
 			}
 		}
@@ -201,6 +225,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				x y "lfigpmin"
+			}
+			SVG        @Yield {
 				x y "lfigpmin"
 			}
 			PDF @Yield {
@@ -217,6 +244,9 @@ def @Fig
 	    	PostScript @Yield {
 				x y "lfigdistance"
 			}
+			SVG        @Yield {
+				x y "lfigdistance"
+			}
 			PDF @Yield {
 			}
 		}
@@ -229,6 +259,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				x y "lfigxdistance"
+			}
+			SVG        @Yield {
 				x y "lfigxdistance"
 			}
 			PDF @Yield {
@@ -245,6 +278,9 @@ def @Fig
 	    	PostScript @Yield {
 				x y "lfigydistance"
 			}
+			SVG        @Yield {
+				x y "lfigydistance"
+			}
 			PDF @Yield {
 			}
 		}
@@ -259,6 +295,9 @@ def @Fig
 	    	PostScript @Yield {
 				x y "lfigangle"
 			}
+			SVG        @Yield {
+				x y "lfigangle"
+			}
 			PDF @Yield {
 			}
 		}
@@ -268,6 +307,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				"lfigprevious"
+			}
+			SVG        @Yield {
 				"lfigprevious"
 			}
 			PDF @Yield {
@@ -285,6 +327,10 @@ def @Fig
 				{ "currentdict end" maxlabels "dict begin begin"
 				  // "("name") lfigpromotelabels" } @Graphic x
 			}
+			SVG        @Yield {
+				{ "currentdict end" maxlabels "dict begin begin"
+				  // "("name") lfigpromotelabels" } @Graphic x
+			}
 			PDF @Yield {
 			}
 		}
@@ -295,6 +341,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				"/"name "lfigpointdef"
+			}
+			SVG        @Yield {
 				"/"name "lfigpointdef"
 			}
 			PDF @Yield {
@@ -309,6 +358,12 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				{ point "translate" } @InnerGraphic
+				{
+				    /0io |0io @OneCol @OneRow x |0io /0io
+				}
+			}
+			SVG        @Yield {
 				{ point "translate" } @InnerGraphic
 				{
 				    /0io |0io @OneCol @OneRow x |0io /0io
@@ -333,6 +388,14 @@ def @Fig
 				    } |0io /0io
 				}
 			}
+			SVG        @Yield {
+				{ point "translate" } @InnerGraphic
+				{
+				    /0io |0io @OneRow @OneCol {
+				    | @OneCol @OneRow x ^/
+				    } |0io /0io
+				}
+			}
 			PDF @Yield {
 			}
 		}
@@ -342,6 +405,9 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				"lfigshowlabels" @Graphic
+			}
+			SVG        @Yield {
 				"lfigshowlabels" @Graphic
 			}
 			PDF @Yield {
@@ -365,6 +431,49 @@ def @Fig
     {
 	    @BackEnd @Case {
 	    	PostScript @Yield {
+				@HContract @VContract
+				{
+				    #fill the shape
+				    paint @Case
+				    {
+					nopaint @Yield {}
+			
+					{ nochange darkblue blue lightblue darkgreen green lightgreen
+					  darkred red lightred darkcyan cyan lightcyan darkmagenta
+					  magenta lightmagenta darkyellow yellow lightyellow darkgray
+					  gray lightgray darkgrey grey lightgrey black white }
+					@Yield
+					{ "/lfig"paint "[" shape "] gsave lfigpaintpath grestore" }
+				    }
+			
+				    # stroke the path and add any arrowheads
+				    linestyle @Case
+				    {
+					{ solid dashed cdashed dotted noline } @Yield
+					{
+					    linewidth "setlinewidth" "lfig"linecap "setlinecap"
+					    dashlength "/lfig"linestyle "[" shape "] lfigdopath"
+					    arrow @Case
+					    {
+						noarrow @Yield { pop pop }
+						{ forward back both } @Yield
+						{  dashlength "/lfig"linestyle "/"lfigblack
+						   headstyle @Case
+						   { { open halfopen closed } @Yield "lfig"headstyle }
+						   headlength headwidth "lfig"arrow
+						}
+					    }
+					}
+				    }
+				}
+				@Graphic
+				{
+				    ^/margin ^|margin @OneCol @OneRow x |margin
+				     /margin
+				}
+			}
+
+			SVG        @Yield {
 				@HContract @VContract
 				{
 				    #fill the shape
@@ -487,6 +596,24 @@ def @Fig
     {
 		@BackEnd @Case {
 			PostScript @Yield {
+				@VContract @HContract 0c @HShift "lfigshadow" @Graphic
+				{
+				  ^/shadow ^|shadow 0c @HShift
+				  @Figure
+				    shape {
+					lfigbox
+				    }
+				    linestyle  { linestyle }
+				    linewidth  { linewidth  }
+				    linecap    { linecap    }
+				    dashlength { dashlength }
+				    paint      { paint      }
+				    margin     { margin     }
+				  0c @HShift x
+				  |shadow /shadow
+				}
+			}
+			SVG        @Yield {
 				@VContract @HContract 0c @HShift "lfigshadow" @Graphic
 				{
 				  ^/shadow ^|shadow 0c @HShift
@@ -915,6 +1042,11 @@ def @Fig
 
     @BackEnd @Case {
         PostScript @Yield {
+            { "grestore save gsave" maxlabels "dict begin lfigdict begin"
+              // "end end restore"
+            } @Graphic @Body
+        }
+        SVG        @Yield {
             { "grestore save gsave" maxlabels "dict begin lfigdict begin"
               // "end end restore"
             } @Graphic @Body

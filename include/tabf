@@ -49,6 +49,7 @@ def @Tab
     named vmargin	{
     	@BackEnd @Case {
     		PostScript @Yield 0.2v
+    		SVG        @Yield 0.2v
     		PDF @Yield 0.2v		# VT: PDF case added
     		PlainText @Yield 0.5v
     	}
@@ -58,42 +59,49 @@ def @Tab
 		named c left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" cm" }
+		    	SVG        @Yield { x" cm" }
 		    	PDF        @Yield { "__mul(__cm, "x")" }
 		    }
 		}
 		named i left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" in" }
+		    	SVG        @Yield { x" in" }
 		    	PDF        @Yield { "__mul(__in, "x")" }
 		    }
 		}
 		named e left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" em" }
+		    	SVG        @Yield { x" em" }
 		    	PDF        @Yield { "__mul(__em, "x")" }
 		    }
 		}
 		named p left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" pt" }
+		    	SVG        @Yield { x" pt" }
 		    	PDF        @Yield { "__mul(__pt, "x")" }
 		    }
 		}
 		named f left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" ft" }
+		    	SVG        @Yield { x" ft" }
 		    	PDF        @Yield { "__mul(__loutf, "x")" }
 		    }
 		}
 		named s left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" sp" }
+		    	SVG        @Yield { x" sp" }
 		    	PDF        @Yield { "__mul(__louts, "x")" }
 		    }
 		}
 		named v left x {
 		    @BackEnd @Case {
 		    	PostScript @Yield { x" vs" }
+		    	SVG        @Yield { x" vs" }
 		    	PDF        @Yield { "__mul(__loutv, "x")" }
 		    }
 		}
@@ -283,6 +291,7 @@ def @Tab
     def @HSingle	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhs   }
+	  SVG        @Yield { linewidth ltabhs   }
 	  PDF        @Yield { "0 0 m __xsize 0 l" linewidth "w 0 J S" }
     	}
     }
@@ -290,6 +299,7 @@ def @Tab
     def @HSingleProject	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhsp  }
+	  SVG        @Yield { linewidth ltabhsp  }
 	  PDF        @Yield { "0 0 m __xsize 0 l" linewidth "w 2 J S" }
     	}
     }
@@ -297,6 +307,7 @@ def @Tab
     def @HDouble	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhd   }
+	  SVG        @Yield { linewidth ltabhd   }
 	  PDF        @Yield {		#   dup dup
 	  	"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 	  	"0 __mul(3, " linewidth ") m __xsize __mul(3, " linewidth ") l"	#  0 exch 3 mul moveto xsize exch 3 mul lineto
@@ -308,6 +319,7 @@ def @Tab
     def @HDoubleBelow	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdb  }
+	  SVG        @Yield { linewidth ltabhdb  }
 	  PDF        @Yield {		#   dup dup
 		"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 		"0 __mul(-3, "linewidth") m __xsize __mul(-3, "linewidth") l"	#  0 exch -3 mul moveto xsize exch -3 mul lineto
@@ -319,6 +331,7 @@ def @Tab
     def @HDoubleNW	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdnw  }
+	  SVG        @Yield { linewidth ltabhdnw  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 		"__xsize __mul(3, "linewidth") m"	#	xsize exch 3 mul moveto
@@ -332,6 +345,7 @@ def @Tab
     def @HDoubleNE	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdne  }
+	  SVG        @Yield { linewidth ltabhdne  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 		"0 __mul(3, "linewidth") m"	#	0 exch 3 mul moveto
@@ -345,6 +359,7 @@ def @Tab
     def @HDoubleSW	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdsw  }
+	  SVG        @Yield { linewidth ltabhdsw  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#	0 0 moveto xsize 0 lineto
 		"__xsize __mul(-3, "linewidth") m"	#	xsize exch -3 mul moveto
@@ -358,6 +373,7 @@ def @Tab
     def @HDoubleSE	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdse  }
+	  SVG        @Yield { linewidth ltabhdse  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#	0 0 moveto xsize 0 lineto
 		"0 __mul(-3, "linewidth") m"	#	0 exch -3 mul moveto
@@ -371,6 +387,7 @@ def @Tab
     def @VSingle	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabvs  }
+	  SVG        @Yield { linewidth ltabvs  }
 	  PDF        @Yield {
 		"0 0 m 0 __ysize l"	#	0 0 moveto 0 ysize lineto
 		linewidth "w 0 J S"	#	setlinewidth 0 setlinecap stroke
@@ -381,6 +398,7 @@ def @Tab
     def @VDouble	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabvd  }
+	  SVG        @Yield { linewidth ltabvd  }
 	  PDF        @Yield {	#	dup dup
 		"0 0 m 0 __ysize l"	#	0 0 moveto 0 ysize lineto
 		"__mul(-3, "linewidth") 0 m __mul(-3, "linewidth") __ysize l"	#	-3 mul 0 moveto -3 mul ysize lineto
@@ -392,6 +410,7 @@ def @Tab
     def @VDoubleRight	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabvdr  }
+	  SVG        @Yield { linewidth ltabvdr  }
 	  PDF        @Yield {	#	dup dup
 		"0 0 m 0 __ysize l"	#	0 0 moveto 0 ysize lineto
 		"__mul(3, "linewidth") 0 m __mul(3, "linewidth") __ysize l"		#	3 mul 0 moveto 3 mul ysize lineto

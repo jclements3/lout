@@ -236,7 +236,8 @@ static FULL_CHAR *GetArg(char *argv[], int argc, int *i)
 typedef enum {
   BE_PLAIN,
   BE_PS,
-  BE_PDF
+  BE_PDF,
+  BE_SVG
 } BE_TYPE;
 
 static void run(int argc, char *argv[], int run_num, int *runs_to_do,
@@ -477,6 +478,12 @@ static void run(int argc, char *argv[], int run_num, int *runs_to_do,
 	break;
 
 
+      case CH_FLAG_SVG:
+
+	be_type = BE_SVG;
+	break;
+
+
       case CH_FLAG_FFPLAIN:
 
 	if( StringEqual(AsciiToFull(argv[i]+1), STR_PDF) )
@@ -690,6 +697,8 @@ static void run(int argc, char *argv[], int run_num, int *runs_to_do,
       BackEnd = Plain_BackEnd;
     else if( be_type == BE_PS )
       BackEnd = PS_BackEnd;
+    else if( be_type == BE_SVG )
+      BackEnd = SVG_BackEnd;
     else
       BackEnd = PDF_BackEnd;
     BackEnd->PrintInitialize(out_fp, encapsulated);
@@ -699,6 +708,8 @@ static void run(int argc, char *argv[], int run_num, int *runs_to_do,
     /* not last run, so use a null backend */
     if( be_type == BE_PLAIN )
       BackEnd = Plain_NullBackEnd;
+    else if( be_type == BE_SVG )
+      BackEnd = SVG_NullBackEnd;
     else
       BackEnd = PS_NullBackEnd;
     BackEnd->PrintInitialize(NULL, encapsulated);

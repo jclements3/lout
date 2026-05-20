@@ -92,6 +92,10 @@ def @Place
 	    { "LoutPageDict begin matr setmatrix" x y "translate end gsave"
 	      // "grestore" } @Graphic val
 	}
+	SVG        @Yield {
+	    { "LoutPageDict begin matr setmatrix" x y "translate end gsave"
+	      // "grestore" } @Graphic val
+	}
 	else @Yield { { "% @Place UNIMPLEMENTED" } @Graphic val	# VT: PDF currently has no output
 	}
       }
@@ -474,6 +478,13 @@ def @BasicSetup
 	@BackEnd @Case {
 
 	    PostScript @Yield {
+		0.65w @VShift @VContract @HContract
+		"xsize ysize ysize 0.07 mul louteuro" @Graphic {
+		    0.7f @High 0.735f @Wide
+		}
+	    }
+
+	    SVG @Yield {
 		0.65w @VShift @VContract @HContract
 		"xsize ysize ysize 0.07 mul louteuro" @Graphic {
 		    0.7f @High 0.735f @Wide
@@ -923,6 +934,7 @@ def @BasicSetup
 	    nochange @Yield {
 		@BackEnd @Case {
 		    PostScript @Yield { "gsave" texture "fill grestore" }
+		    SVG        @Yield { "gsave" texture "fill grestore" }
 		    PDF        @Yield { "q f Q" }
 		    PlainText  @Yield { "" }
 		}
@@ -930,6 +942,7 @@ def @BasicSetup
 	    else @Yield {
 		@BackEnd @Case {
 		    PostScript @Yield {"gsave" @ColourCommand col texture "fill grestore"}
+		    SVG        @Yield {"gsave" @ColourCommand col texture "fill grestore"}
 		    PDF        @Yield { "q" @ColourCommand col "f Q" }
 		    PlainText  @Yield { "" }
 		}
@@ -941,6 +954,13 @@ def @BasicSetup
     {
 	@BackEnd @Case {
 	    PostScript @Yield {
+		linewidth @Case {
+		    ""   @Yield { "stroke" }
+		    none @Yield { }
+		    else @Yield { linewidth "setlinewidth stroke" }
+		}
+	    }
+	    SVG        @Yield {
 		linewidth @Case {
 		    ""   @Yield { "stroke" }
 		    none @Yield { }
@@ -975,6 +995,10 @@ def @BasicSetup
 		{ "LoutRule" @StrokeCommand linewidth } @Graphic { 0.5p @High }
 	    }
 
+	    SVG @Yield @HExpand {
+		{ "LoutRule" @StrokeCommand linewidth } @Graphic { 0.5p @High }
+	    }
+
 	    PDF @Yield @HExpand {
 		{ "0 0 m __xsize 0 l" @StrokeCommand linewidth } @Graphic { 0.5p @High }
 	    }
@@ -989,6 +1013,10 @@ def @BasicSetup
 	@BackEnd @Case {
 
 	    PostScript @Yield {
+		{ "LoutRule" @StrokeCommand linewidth } @Graphic { 0.5p @High }
+	    }
+
+	    SVG @Yield {
 		{ "LoutRule" @StrokeCommand linewidth } @Graphic { 0.5p @High }
 	    }
 
@@ -1010,6 +1038,12 @@ def @BasicSetup
 	@BackEnd @Case {
 
 	    PostScript @Yield @VContract @HContract 0c @HShift {
+		{"LoutBox" paint @AddPaint texture @StrokeCommand linewidth }
+		@Graphic
+		{ ^/margin ^|margin 0c @HShift @OneRow x |margin /margin }
+	    }
+
+	    SVG @Yield @VContract @HContract 0c @HShift {
 		{"LoutBox" paint @AddPaint texture @StrokeCommand linewidth }
 		@Graphic
 		{ ^/margin ^|margin 0c @HShift @OneRow x |margin /margin }
@@ -1065,6 +1099,12 @@ def @BasicSetup
 		{ ^/margin ^|margin 0c @HShift @OneRow x |margin /margin }
 	    }
 
+	    SVG @Yield {
+		{"LoutCurveBox" paint @AddPaint texture @StrokeCommand linewidth }
+		@Graphic
+		{ ^/margin ^|margin 0c @HShift @OneRow x |margin /margin }
+	    }
+
 	    PlainText @Yield {
 		^/margin ^|margin 0c @HShift @OneRow x |margin /margin
 	    }
@@ -1087,6 +1127,18 @@ def @BasicSetup
 	@VContract @HContract 0c @HShift @BackEnd @Case {
 
 	    PostScript @Yield {
+		"LoutShadowBox fill" @Graphic
+		{ ^/shadow ^|shadow 0c @HShift
+		      @Box
+			  margin {margin}
+			  paint {paint}
+			  texture { texture }
+			  linewidth {linewidth} x
+		      |shadow /shadow
+		}
+	    }
+
+	    SVG @Yield {
 		"LoutShadowBox fill" @Graphic
 		{ ^/shadow ^|shadow 0c @HShift
 		      @Box
@@ -1188,7 +1240,22 @@ def @BasicSetup
 		    @ULSpot @UpStroke
 		    @URSpot @RightStroke
 		    @URSpot @UpStroke
-	
+
+		    linewidth "setlinewidth stroke"
+		} @Graphic {}
+	    }
+
+	    SVG @Yield {
+		{
+		    @LLSpot @LeftStroke
+		    @LLSpot @DownStroke
+		    @LRSpot @DownStroke
+		    @LRSpot @RightStroke
+		    @ULSpot @LeftStroke
+		    @ULSpot @UpStroke
+		    @URSpot @RightStroke
+		    @URSpot @UpStroke
+
 		    linewidth "setlinewidth stroke"
 		} @Graphic {}
 	    }
@@ -1212,6 +1279,19 @@ def @BasicSetup
     {
       { @BackEnd @Case {
 	PostScript @Yield
+	{
+	  "[" author @Case {
+	    "" @Yield ""
+	    else @Yield { "/Author ("author")" } }
+	  title @Case {
+	    "" @Yield ""
+	    else @Yield { "/Title ("title")" } }
+	  keywords @Case {
+	    "" @Yield ""
+	    else @Yield { "/Keywords ("keywords")" } }
+	  "/DOCINFO pdfmark"
+	}
+	SVG        @Yield
 	{
 	  "[" author @Case {
 	    "" @Yield ""

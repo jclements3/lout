@@ -1642,6 +1642,9 @@ def @DiagSetup
             PostScript @Yield {
               { ps gsave // grestore } @Graphic x
             }
+            SVG        @Yield {
+              { ps gsave // grestore } @Graphic x
+            }
             PDF @Yield {
               { ps q // Q } @Graphic x
             }
@@ -1652,6 +1655,9 @@ def @DiagSetup
 	{
           @BackEnd @Case {
             PostScript @Yield {
+	        "[ ldiagbox ] pop" @Graphic x
+	      }
+	      SVG        @Yield {
 	        "[ ldiagbox ] pop" @Graphic x
 	      }
 	      PDF @Yield {}
@@ -1690,6 +1696,12 @@ def @DiagSetup
               // "ldiagshowtags ldiagpopuptagdict"
 	      } @Graphic x
 	      }
+	      SVG        @Yield {
+            {
+	      "() ldiagpushtagdict"
+              // "ldiagshowtags ldiagpopuptagdict"
+	      } @Graphic x
+	      }
 	      PDF @Yield {}
 	    }
         }
@@ -1704,6 +1716,12 @@ def @DiagSetup
               // "ldiagshowpoints ldiagpopuptagdict"
 	      } @Graphic x
 	      }
+	      SVG        @Yield {
+            {
+	      "() ldiagpushtagdict"
+              // "ldiagshowpoints ldiagpopuptagdict"
+	      } @Graphic x
+	      }
 	      PDF @Yield {}
 	    }
         }
@@ -1713,6 +1731,10 @@ def @DiagSetup
         {
           @BackEnd @Case {
             PostScript @Yield {
+            { "() ldiagpushtagdict"
+              // "ldiagshowangles ldiagpopuptagdict" } @Graphic x
+	      }
+	      SVG        @Yield {
             { "() ldiagpushtagdict"
               // "ldiagshowangles ldiagpopuptagdict" } @Graphic x
 	      }
@@ -1750,6 +1772,7 @@ def @DiagSetup
 
             @BackEnd @Case {
 		PostScript @Yield { {@PushCommand // @PopCommand} @Graphic x }
+		SVG        @Yield { {@PushCommand // @PopCommand} @Graphic x }
 		PDF @Yield {}
 	    }
         }
@@ -1761,6 +1784,13 @@ def @DiagSetup
         {
           @BackEnd @Case {
             PostScript @Yield {
+            {
+	       "() ldiagpushtagdict"
+               // "ldiagpoptagdict"
+	      }
+	      @Graphic x
+	      }
+	      SVG        @Yield {
             {
 	       "() ldiagpushtagdict"
                // "ldiagpoptagdict"
@@ -1796,6 +1826,12 @@ def @DiagSetup
 		{ back both }	     @Yield {"("arrowlength") ldiagdecodelength"}
 	    }
 	    }
+	    SVG        @Yield {
+	    arrow @Case {
+		{ no yes forward }   @Yield 0
+		{ back both }	     @Yield {"("arrowlength") ldiagdecodelength"}
+	    }
+	    }
 	    PDF @Yield {}
 	  }
 	}
@@ -1806,6 +1842,12 @@ def @DiagSetup
 	{
         @BackEnd @Case {
           PostScript @Yield {
+	    arrow @Case {
+		{ no back }	     @Yield 0
+		{ yes forward both } @Yield {"("arrowlength") ldiagdecodelength"}
+	    }
+	    }
+	    SVG        @Yield {
 	    arrow @Case {
 		{ no back }	     @Yield 0
 		{ yes forward both } @Yield {"("arrowlength") ldiagdecodelength"}
@@ -1837,6 +1879,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -1848,6 +1891,21 @@ def @DiagSetup
           @BackEnd @Case {
 
             PostScript @Yield {
+            { rotate "rotate" scale "scale newpath clip" }
+            @InnerGraphic
+            {
+                @ZeroSize x
+            }
+            //
+            # { rotate "rotate" scale "scale" translate "translate" }
+            { translate "translate" rotate "rotate" scale "scale" }
+            @InnerGraphic
+            {
+                @ZeroSize x
+            }
+	      }
+
+	      SVG        @Yield {
             { rotate "rotate" scale "scale newpath clip" }
             @InnerGraphic
             {
@@ -2713,6 +2771,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -2996,6 +3055,26 @@ def @DiagSetup
 		    }
 		}
 		  }
+		  SVG        @Yield {
+		outline @Case {
+		    box		@Yield { "ldiagbox"			}
+		    curvebox	@Yield { "("margin") ldiagcurvebox"	}
+		    shadowbox	@Yield { shadow "ldiagshadow ldiagbox"	}
+		    square	@Yield { "ldiagsquare"			}
+		    diamond	@Yield { "ldiagdiamond"			}
+		    polygon	@Yield { sides angle "ldiagpolygon"	}
+		    isosceles	@Yield { "ldiagisosceles"		}
+		    ellipse	@Yield { "ldiagellipse"			}
+		    circle	@Yield { "ldiagcircle"			}
+		    else	    @Yield {
+				    outline
+					margin { "("margin") ldiagdecodelength" }
+					shadow { shadow }
+					sides  { sides  }
+					angle  { angle  }
+		    }
+		}
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -3004,6 +3083,35 @@ def @DiagSetup
             {
               @BackEnd @Case {
                 PostScript @Yield {
+		@HContract @VContract
+		{
+		    {
+			"ldiagnodebegin [" @OutLine "]" outlinedashlength
+			"[" outlinestyle "]" outlinewidth
+			"{" @ColourCommand outlinecolour "}"
+			paint @PSAddPaint texture "ldiagnodeend"
+			"(IN) ldiagpushtagdict"
+			//
+			"ldiagpopuptagdict"
+		    }
+		    @Graphic
+		    {
+			{@Align valign} @VShift {@Align halign} @HShift
+			@AddMargins
+			    mtop   { topmargin   @Else vmargin @Else margin }
+			    mfoot  { footmargin  @Else vmargin @Else margin }
+			    mleft  { leftmargin  @Else hmargin @Else margin }
+			    mright { rightmargin @Else hmargin @Else margin }
+			    @HSize @VSize @HContract @VContract
+			    font @Font break @Break format @Strut @Body
+		    }
+		    / {alabel @Else nodelabel} @IfNonEmpty @ALabel
+		    / {blabel @Else nodelabel} @IfNonEmpty @BLabel
+		    / {clabel @Else nodelabel} @IfNonEmpty @CLabel
+		    / {dlabel @Else nodelabel} @IfNonEmpty @DLabel
+		}
+                }
+                SVG        @Yield {
 		@HContract @VContract
 		{
 		    {
@@ -3065,6 +3173,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -3348,6 +3457,26 @@ def @DiagSetup
 		    }
 		}
 		  }
+		  SVG        @Yield {
+		outline @Case {
+		    box		@Yield { "ldiagbox"			}
+		    curvebox	@Yield { "("margin") ldiagcurvebox"	}
+		    shadowbox	@Yield { shadow "ldiagshadow ldiagbox"	}
+		    square	@Yield { "ldiagsquare"			}
+		    diamond	@Yield { "ldiagdiamond"			}
+		    polygon	@Yield { sides angle "ldiagpolygon"	}
+		    isosceles	@Yield { "ldiagisosceles"		}
+		    ellipse	@Yield { "ldiagellipse"			}
+		    circle	@Yield { "ldiagcircle"			}
+		    else	    @Yield {
+				    outline
+					margin { "("margin") ldiagdecodelength" }
+					shadow { shadow }
+					sides  { sides  }
+					angle  { angle  }
+		    }
+		}
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -3356,6 +3485,35 @@ def @DiagSetup
             {
               @BackEnd @Case {
                 PostScript @Yield {
+		@HContract @VContract
+		{
+		    {
+			"ldiagnodebegin [" @OutLine "]" outlinedashlength
+			"[" outlinestyle "]" outlinewidth
+			"{" @ColourCommand outlinecolour "}"
+			paint @PSAddPaint texture "ldiagnodeend"
+			"(IN) ldiagpushtagdict"
+			//
+			"ldiagpopuptagdict"
+		    }
+		    @Graphic
+		    {
+			{@Align valign} @VShift {@Align halign} @HShift
+			@AddMargins
+			    mtop   { topmargin   @Else vmargin @Else margin }
+			    mfoot  { footmargin  @Else vmargin @Else margin }
+			    mleft  { leftmargin  @Else hmargin @Else margin }
+			    mright { rightmargin @Else hmargin @Else margin }
+			    @HSize @VSize @HContract @VContract
+			    font @Font break @Break format @Strut @Body
+		    }
+		    / {alabel @Else nodelabel} @IfNonEmpty @ALabel
+		    / {blabel @Else nodelabel} @IfNonEmpty @BLabel
+		    / {clabel @Else nodelabel} @IfNonEmpty @CLabel
+		    / {dlabel @Else nodelabel} @IfNonEmpty @DLabel
+		}
+                }
+                SVG        @Yield {
 		@HContract @VContract
 		{
 		    {
@@ -3417,6 +3575,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -3700,6 +3859,26 @@ def @DiagSetup
 		    }
 		}
 		  }
+		  SVG        @Yield {
+		outline @Case {
+		    box		@Yield { "ldiagbox"			}
+		    curvebox	@Yield { "("margin") ldiagcurvebox"	}
+		    shadowbox	@Yield { shadow "ldiagshadow ldiagbox"	}
+		    square	@Yield { "ldiagsquare"			}
+		    diamond	@Yield { "ldiagdiamond"			}
+		    polygon	@Yield { sides angle "ldiagpolygon"	}
+		    isosceles	@Yield { "ldiagisosceles"		}
+		    ellipse	@Yield { "ldiagellipse"			}
+		    circle	@Yield { "ldiagcircle"			}
+		    else	    @Yield {
+				    outline
+					margin { "("margin") ldiagdecodelength" }
+					shadow { shadow }
+					sides  { sides  }
+					angle  { angle  }
+		    }
+		}
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -3708,6 +3887,35 @@ def @DiagSetup
             {
               @BackEnd @Case {
                 PostScript @Yield {
+		@HContract @VContract
+		{
+		    {
+			"ldiagnodebegin [" @OutLine "]" outlinedashlength
+			"[" outlinestyle "]" outlinewidth
+			"{" @ColourCommand outlinecolour "}"
+			paint @PSAddPaint texture "ldiagnodeend"
+			"(IN) ldiagpushtagdict"
+			//
+			"ldiagpopuptagdict"
+		    }
+		    @Graphic
+		    {
+			{@Align valign} @VShift {@Align halign} @HShift
+			@AddMargins
+			    mtop   { topmargin   @Else vmargin @Else margin }
+			    mfoot  { footmargin  @Else vmargin @Else margin }
+			    mleft  { leftmargin  @Else hmargin @Else margin }
+			    mright { rightmargin @Else hmargin @Else margin }
+			    @HSize @VSize @HContract @VContract
+			    font @Font break @Break format @Strut @Body
+		    }
+		    / {alabel @Else nodelabel} @IfNonEmpty @ALabel
+		    / {blabel @Else nodelabel} @IfNonEmpty @BLabel
+		    / {clabel @Else nodelabel} @IfNonEmpty @CLabel
+		    / {dlabel @Else nodelabel} @IfNonEmpty @DLabel
+		}
+                }
+                SVG        @Yield {
 		@HContract @VContract
 		{
 		    {
@@ -3769,6 +3977,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -4052,6 +4261,26 @@ def @DiagSetup
 		    }
 		}
 		  }
+		  SVG        @Yield {
+		outline @Case {
+		    box		@Yield { "ldiagbox"			}
+		    curvebox	@Yield { "("margin") ldiagcurvebox"	}
+		    shadowbox	@Yield { shadow "ldiagshadow ldiagbox"	}
+		    square	@Yield { "ldiagsquare"			}
+		    diamond	@Yield { "ldiagdiamond"			}
+		    polygon	@Yield { sides angle "ldiagpolygon"	}
+		    isosceles	@Yield { "ldiagisosceles"		}
+		    ellipse	@Yield { "ldiagellipse"			}
+		    circle	@Yield { "ldiagcircle"			}
+		    else	    @Yield {
+				    outline
+					margin { "("margin") ldiagdecodelength" }
+					shadow { shadow }
+					sides  { sides  }
+					angle  { angle  }
+		    }
+		}
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -4060,6 +4289,35 @@ def @DiagSetup
             {
               @BackEnd @Case {
                 PostScript @Yield {
+		@HContract @VContract
+		{
+		    {
+			"ldiagnodebegin [" @OutLine "]" outlinedashlength
+			"[" outlinestyle "]" outlinewidth
+			"{" @ColourCommand outlinecolour "}"
+			paint @PSAddPaint texture "ldiagnodeend"
+			"(IN) ldiagpushtagdict"
+			//
+			"ldiagpopuptagdict"
+		    }
+		    @Graphic
+		    {
+			{@Align valign} @VShift {@Align halign} @HShift
+			@AddMargins
+			    mtop   { topmargin   @Else vmargin @Else margin }
+			    mfoot  { footmargin  @Else vmargin @Else margin }
+			    mleft  { leftmargin  @Else hmargin @Else margin }
+			    mright { rightmargin @Else hmargin @Else margin }
+			    @HSize @VSize @HContract @VContract
+			    font @Font break @Break format @Strut @Body
+		    }
+		    / {alabel @Else nodelabel} @IfNonEmpty @ALabel
+		    / {blabel @Else nodelabel} @IfNonEmpty @BLabel
+		    / {clabel @Else nodelabel} @IfNonEmpty @CLabel
+		    / {dlabel @Else nodelabel} @IfNonEmpty @DLabel
+		}
+                }
+                SVG        @Yield {
 		@HContract @VContract
 		{
 		    {
@@ -4121,6 +4379,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -4404,6 +4663,26 @@ def @DiagSetup
 		    }
 		}
 		  }
+		  SVG        @Yield {
+		outline @Case {
+		    box		@Yield { "ldiagbox"			}
+		    curvebox	@Yield { "("margin") ldiagcurvebox"	}
+		    shadowbox	@Yield { shadow "ldiagshadow ldiagbox"	}
+		    square	@Yield { "ldiagsquare"			}
+		    diamond	@Yield { "ldiagdiamond"			}
+		    polygon	@Yield { sides angle "ldiagpolygon"	}
+		    isosceles	@Yield { "ldiagisosceles"		}
+		    ellipse	@Yield { "ldiagellipse"			}
+		    circle	@Yield { "ldiagcircle"			}
+		    else	    @Yield {
+				    outline
+					margin { "("margin") ldiagdecodelength" }
+					shadow { shadow }
+					sides  { sides  }
+					angle  { angle  }
+		    }
+		}
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -4412,6 +4691,35 @@ def @DiagSetup
             {
               @BackEnd @Case {
                 PostScript @Yield {
+		@HContract @VContract
+		{
+		    {
+			"ldiagnodebegin [" @OutLine "]" outlinedashlength
+			"[" outlinestyle "]" outlinewidth
+			"{" @ColourCommand outlinecolour "}"
+			paint @PSAddPaint texture "ldiagnodeend"
+			"(IN) ldiagpushtagdict"
+			//
+			"ldiagpopuptagdict"
+		    }
+		    @Graphic
+		    {
+			{@Align valign} @VShift {@Align halign} @HShift
+			@AddMargins
+			    mtop   { topmargin   @Else vmargin @Else margin }
+			    mfoot  { footmargin  @Else vmargin @Else margin }
+			    mleft  { leftmargin  @Else hmargin @Else margin }
+			    mright { rightmargin @Else hmargin @Else margin }
+			    @HSize @VSize @HContract @VContract
+			    font @Font break @Break format @Strut @Body
+		    }
+		    / {alabel @Else nodelabel} @IfNonEmpty @ALabel
+		    / {blabel @Else nodelabel} @IfNonEmpty @BLabel
+		    / {clabel @Else nodelabel} @IfNonEmpty @CLabel
+		    / {dlabel @Else nodelabel} @IfNonEmpty @DLabel
+		}
+                }
+                SVG        @Yield {
 		@HContract @VContract
 		{
 		    {
@@ -4473,6 +4781,7 @@ def @DiagSetup
                 named to precedence 10 left x right y {
                   @BackEnd @Case {
                     PostScript @Yield { x y "ldiagpsub" }
+                    SVG        @Yield { x y "ldiagpsub" }
                     PDF @Yield {""}
                   }
                 }
@@ -4756,6 +5065,26 @@ def @DiagSetup
 		    }
 		}
 		  }
+		  SVG        @Yield {
+		outline @Case {
+		    box		@Yield { "ldiagbox"			}
+		    curvebox	@Yield { "("margin") ldiagcurvebox"	}
+		    shadowbox	@Yield { shadow "ldiagshadow ldiagbox"	}
+		    square	@Yield { "ldiagsquare"			}
+		    diamond	@Yield { "ldiagdiamond"			}
+		    polygon	@Yield { sides angle "ldiagpolygon"	}
+		    isosceles	@Yield { "ldiagisosceles"		}
+		    ellipse	@Yield { "ldiagellipse"			}
+		    circle	@Yield { "ldiagcircle"			}
+		    else	    @Yield {
+				    outline
+					margin { "("margin") ldiagdecodelength" }
+					shadow { shadow }
+					sides  { sides  }
+					angle  { angle  }
+		    }
+		}
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -4764,6 +5093,35 @@ def @DiagSetup
             {
               @BackEnd @Case {
                 PostScript @Yield {
+		@HContract @VContract
+		{
+		    {
+			"ldiagnodebegin [" @OutLine "]" outlinedashlength
+			"[" outlinestyle "]" outlinewidth
+			"{" @ColourCommand outlinecolour "}"
+			paint @PSAddPaint texture "ldiagnodeend"
+			"(IN) ldiagpushtagdict"
+			//
+			"ldiagpopuptagdict"
+		    }
+		    @Graphic
+		    {
+			{@Align valign} @VShift {@Align halign} @HShift
+			@AddMargins
+			    mtop   { topmargin   @Else vmargin @Else margin }
+			    mfoot  { footmargin  @Else vmargin @Else margin }
+			    mleft  { leftmargin  @Else hmargin @Else margin }
+			    mright { rightmargin @Else hmargin @Else margin }
+			    @HSize @VSize @HContract @VContract
+			    font @Font break @Break format @Strut @Body
+		    }
+		    / {alabel @Else nodelabel} @IfNonEmpty @ALabel
+		    / {blabel @Else nodelabel} @IfNonEmpty @BLabel
+		    / {clabel @Else nodelabel} @IfNonEmpty @CLabel
+		    / {dlabel @Else nodelabel} @IfNonEmpty @DLabel
+		}
+                }
+                SVG        @Yield {
 		@HContract @VContract
 		{
 		    {
@@ -4869,6 +5227,9 @@ def @DiagSetup
 		    PostScript @Yield {
 		    "ldiagsolidarrowhead"
 		    }
+		    SVG        @Yield {
+		    "ldiagsvgsolidarrowhead"
+		    }
 		    PDF @Yield {}
 		  }
 		}
@@ -4888,6 +5249,9 @@ def @DiagSetup
 		  @BackEnd @Case {
 		    PostScript @Yield {
 		    pathwidth "ldiagsolidwithbararrowhead"
+		    }
+		    SVG        @Yield {
+		    pathwidth "ldiagsvgsolidwithbararrowhead"
 		    }
 		    PDF @Yield {}
 		  }
@@ -4910,6 +5274,9 @@ def @DiagSetup
 		    PostScript @Yield {
 		    pathwidth pathgap "ldiagopenarrowhead"
 		    }
+		    SVG        @Yield {
+		    pathwidth pathgap "ldiagsvgopenarrowhead"
+		    }
 		    PDF @Yield {}
 		  }
 		}
@@ -4931,6 +5298,9 @@ def @DiagSetup
 		    PostScript @Yield {
 		    pathwidth pathgap "ldiaghalfopenarrowhead"
 		    }
+		    SVG        @Yield {
+		    pathwidth pathgap "ldiagsvghalfopenarrowhead"
+		    }
 		    PDF @Yield {}
 		  }
 		}
@@ -4950,6 +5320,9 @@ def @DiagSetup
 		  @BackEnd @Case {
 		    PostScript @Yield {
 		    "ldiagsolidcurvedarrowhead"
+		    }
+		    SVG        @Yield {
+		    "ldiagsvgsolidcurvedarrowhead"
 		    }
 		    PDF @Yield {}
 		  }
@@ -4972,6 +5345,9 @@ def @DiagSetup
 		    PostScript @Yield {
 		    pathwidth pathgap "ldiagopencurvedarrowhead"
 		    }
+		    SVG        @Yield {
+		    pathwidth pathgap "ldiagsvgopencurvedarrowhead"
+		    }
 		    PDF @Yield {}
 		  }
 		}
@@ -4992,6 +5368,9 @@ def @DiagSetup
 		  @BackEnd @Case {
 		    PostScript @Yield {
 		    pathwidth pathgap "ldiaghalfopencurvedarrowhead"
+		    }
+		    SVG        @Yield {
+		    pathwidth pathgap "ldiagsvghalfopencurvedarrowhead"
 		    }
 		    PDF @Yield {}
 		  }
@@ -5033,6 +5412,7 @@ def @DiagSetup
 		outline {
 		  @BackEnd @Case {
 		    PostScript @Yield { pathwidth "ldiagmanyarrowhead" }
+		    SVG        @Yield { pathwidth "ldiagsvgmanyarrowhead" }
 		    PDF @Yield {}
 		  }
 		}
@@ -5352,6 +5732,31 @@ def @DiagSetup
                # then { FROM TO }
                # else { FROM LFROM LMID LTO TO }
 		  }
+		  SVG        @Yield {
+	       {arrow @FromArrowLength backarrowlength}
+	       {arrow @ToArrowLength arrowlength}
+	       "{" from "}" "{" to "}"
+	       xindent zindent "ldiaglinepath"
+               # FROM	:< {from??CTR angleto to??CTR}
+               # FROM	:: from boundaryatangle FROM@ANGLE
+               # 	++ {arrow @FromArrowLength backarrowlength}atangle FROM@ANGLE
+               # TO  	:< FROM@ANGLE
+               # TO  	:: to boundaryatangle { TO@ANGLE - 180d }
+               # ++ {arrow @ToArrowLength arrowlength} atangle {TO@ANGLE - 180d}
+               # 		
+               # LMID	:: FROM ** 0.5 ++ TO ** 0.5
+               # LMID	:< FROM@ANGLE
+               # XINDENT	:= xindent min { FROM distance LMID }
+               # LFROM	:: FROM ++ XINDENT atangle FROM@ANGLE
+               # LFROM	:< FROM@ANGLE
+               # ZINDENT	:= zindent min { TO distance LMID }
+               # LTO 	:: TO -- ZINDENT atangle FROM@ANGLE
+               # LTO 	:< FROM@ANGLE
+	       #
+               # if cond { direct }
+               # then { FROM TO }
+               # else { FROM LFROM LMID LTO TO }
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5385,6 +5790,31 @@ def @DiagSetup
                # then { FROM TO }
                # else { FROM LFROM LMID LTO TO }
 		  }
+		  SVG        @Yield {
+	       {arrow @FromArrowLength backarrowlength}
+	       {arrow @ToArrowLength arrowlength}
+	       "{" from "}" "{" to "}"
+	       xindent zindent pathgap "ldiagdoublelinepath"
+               # FROM	:< {from??CTR angleto to??CTR}
+               # FROM	:: from boundaryatangle FROM@ANGLE
+               # 	++ {arrow @FromArrowLength backarrowlength}atangle FROM@ANGLE
+               # TO  	:< FROM@ANGLE
+               # TO  	:: to boundaryatangle { TO@ANGLE - 180d }
+               # ++ {arrow @ToArrowLength arrowlength} atangle {TO@ANGLE - 180d}
+               # 		
+               # LMID	:: FROM ** 0.5 ++ TO ** 0.5
+               # LMID	:< FROM@ANGLE
+               # XINDENT	:= xindent min { FROM distance LMID }
+               # LFROM	:: FROM ++ XINDENT atangle FROM@ANGLE
+               # LFROM	:< FROM@ANGLE
+               # ZINDENT	:= zindent min { TO distance LMID }
+               # LTO 	:: TO -- ZINDENT atangle FROM@ANGLE
+               # LTO 	:< FROM@ANGLE
+	       #
+               # if cond { direct }
+               # then { FROM TO }
+               # else { FROM LFROM LMID LTO TO }
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5394,6 +5824,54 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	       {arrow @FromArrowLength backarrowlength}
+	       {arrow @ToArrowLength arrowlength}
+	       "{" from "}" "{" to "}"
+	       xindent zindent bias "ldiagacurvepath"
+               #  #B1	:= bias max 0.02f
+               #  #B2	:= { from??CTR distance to??CTR } * 0.5
+               #  #BIAS    := B1 min B2
+	       #  BIAS  := bias max 0.02f
+               #  XMID	:= from??CTR ** 0.5 ++ to??CTR ** 0.5
+               #  XTOP	:= XMID ++ BIAS atangle {from??CTR angleto to??CTR - 90d}
+               #  CTR  	:= { from??CTR XTOP ldiaglinebetween
+               #  	     to??CTR   XTOP ldiaglinebetween ldiaglineintersect }
+               #  FROM	:: aabout
+               #  		circum { from }
+               #  		extra  { arrow @FromArrowLength backarrowlength }
+               #  		centre { CTR }
+	       #  FROM 	:< if cond { from??CTR distance FROM > 0 }
+               #  	      then { from??CTR angleto FROM }
+	       #  	      else { CTR angleto FROM + 90d }
+               #  TO	:: cabout
+               #  		circum { to }
+               #  		extra  { arrow @ToArrowLength arrowlength }
+               #  		centre { CTR }
+               #  TO   	:< if cond { TO distance to??CTR > 0 }
+               #  	      then { TO angleto to??CTR }
+               #  	      else { CTR angleto TO + 90d }
+               # 
+               #  RADIUS	:= CTR distance FROM
+               #  LMID 	:: CTR ++ RADIUS atangle {
+               #   CTR angleto FROM +
+	       #   { {360d + {CTR angleto TO} - {CTR angleto FROM}} mod 360 } / 2
+	       #   }
+               #  LMID 	:< CTR angleto LMID  + 90d
+               #
+               #  XINDENT	:= xindent min { FROM distance LMID }
+               #  LFROM	:: CTR ++ RADIUS atangle {
+               #  	   CTR angleto { FROM ++ XINDENT atangle FROM@ANGLE } }
+               #  LFROM	:< CTR angleto LFROM + 90d
+               #  ZINDENT	:= zindent min { TO distance LMID }
+               #  LTO  	:: CTR ++ RADIUS atangle {
+               #  	   CTR angleto { TO ++ ZINDENT atangle {TO@ANGLE+180d}}}
+               #  LTO  	:< CTR angleto LTO   + 90d
+               #
+               #  if cond { direct }
+	       #  then { FROM [CTR] TO }
+               #  else { FROM [CTR] LFROM [CTR] LMID [CTR] LTO [CTR] TO }
+		  }
+		  SVG        @Yield {
 	       {arrow @FromArrowLength backarrowlength}
 	       {arrow @ToArrowLength arrowlength}
 	       "{" from "}" "{" to "}"
@@ -5498,6 +5976,55 @@ def @DiagSetup
               #  else { FROM [CTR clockwise] LFROM [CTR clockwise]
               #         LMID [CTR clockwise] LTO   [CTR clockwise] TO }
 		  }
+		  SVG        @Yield {
+	       {arrow @FromArrowLength backarrowlength}
+	       {arrow @ToArrowLength arrowlength}
+	       "{" from "}" "{" to "}"
+	       xindent zindent bias "ldiagccurvepath"
+              #  #B1     := bias max 0.02f
+              #  #B2     := { from??CTR distance to??CTR } * 0.5
+              #  #BIAS   := B1 min B2
+              #  BIAS   := bias max 0.02f
+              #  XMID   := from??CTR ** 0.5 ++ to??CTR ** 0.5
+              #  XTOP   := XMID ++ BIAS atangle {from??CTR angleto to??CTR + 90d}
+              #  CTR    := { from??CTR XTOP ldiaglinebetween
+              #              to??CTR   XTOP ldiaglinebetween ldiaglineintersect }
+              #  FROM   :: cabout
+              #                  circum { from }
+              #                  extra  { arrow @FromArrowLength backarrowlength }
+              #                  centre { CTR }
+              #  FROM   :< if cond { from??CTR distance FROM > 0 }
+              #               then { from??CTR angleto FROM }
+              #               else { CTR angleto FROM - 90d }
+              #  TO     :: aabout
+              #                 circum { to }
+              #                 extra  { arrow @ToArrowLength arrowlength }
+              #                 centre { CTR }
+              #  TO     :< if cond { TO distance to??CTR > 0 }
+              #               then { TO angleto to??CTR }
+              #               else { CTR angleto TO - 90d }
+              #
+              #  RADIUS  := CTR distance FROM
+              #  LMID    :: CTR ++ RADIUS atangle {
+              #   CTR angleto TO +
+              #   { {360d + {CTR angleto FROM} - {CTR angleto TO} } mod 360 } / 2
+              #   }
+              #  LMID    :< CTR angleto LMID  - 90d
+              #
+              #  XINDENT := xindent min { FROM distance LMID }
+              #  LFROM   :: CTR ++ RADIUS atangle {
+              #             CTR angleto { FROM ++ XINDENT atangle FROM@ANGLE } }
+              #  LFROM   :< CTR angleto LFROM - 90d
+              #  ZINDENT := zindent min { TO distance LMID }
+              #  LTO     :: CTR ++ RADIUS atangle {
+              #             CTR angleto { TO ++ ZINDENT atangle {TO@ANGLE+180d}}}
+              #  LTO     :< CTR angleto LTO   - 90d
+              #
+              #  if cond { direct }
+              #  then { FROM [CTR clockwise] TO }
+              #  else { FROM [CTR clockwise] LFROM [CTR clockwise]
+              #         LMID [CTR clockwise] LTO   [CTR clockwise] TO }
+		  }
 		  PDF @Yield {}
 		}
           }
@@ -5524,6 +6051,24 @@ def @DiagSetup
               # LMID       :: { FROM ++ TO ++ frompt ++ topt } ** 0.25
               # FROM [frompt topt] TO
 		  }
+		  SVG        @Yield {
+	       {arrow @FromArrowLength backarrowlength}
+	       {arrow @ToArrowLength arrowlength}
+	       "{" from "}" "{" to "}"
+	       xindent zindent [ frompt ] [ topt ] "ldiagbezierpath"
+              # FROM      :< from??CTR angleto frompt
+              # FROM      :: from boundaryatangle FROM@ANGLE
+              # ++ {arrow @FromArrowLength backarrowlength} atangle FROM@ANGLE
+              # TO        :< topt angleto to??CTR
+              # TO        :: to boundaryatangle { TO@ANGLE + 180d }
+              # ++ {arrow @ToArrowLength arrowlength} atangle { TO@ANGLE + 180d }
+              # LFROM     :: FROM ++ { xindent atangle FROM@ANGLE }
+              # LFROM     :< FROM@ANGLE
+              # LTO       :: TO ++ zindent atangle { TO@ANGLE + 180d }
+              # LTO       :< TO@ANGLE
+              # LMID       :: { FROM ++ TO ++ frompt ++ topt } ** 0.25
+              # FROM [frompt topt] TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5533,6 +6078,33 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent "ldiagvhlinepath"
+              # CTR     := { {xcoord from??CTR} {ycoord to??CTR} }
+              # FANG    := from??CTR angleto CTR
+              # TANG    := to??CTR angleto CTR
+              # FROM    :: from boundaryatangle FANG
+              # ++ {arrow @FromArrowLength backarrowlength} atangle FANG
+              # FROM    :< FANG
+              # TO      :: to boundaryatangle TANG
+              # ++ {arrow @ToArrowLength arrowlength} atangle TANG
+              # TO      :< TANG + 180d
+              # FDIST   := FROM distance CTR
+              # TDIST   := TO distance CTR
+              # XINDENT := xindent min FDIST
+              # ZINDENT := zindent min TDIST
+              # LFROM   :: FROM ++ XINDENT atangle FANG
+              # LFROM   :< FROM@ANGLE
+              # LTO     :: TO ++ ZINDENT atangle TANG
+              # LTO     :< TO@ANGLE
+              # LMID    :: CTR 
+              # LMID    :< {1f atangle {FANG + 180d}} angleto
+              #            {1f atangle {TANG + 180d}}
+              # FROM LFROM LMID LTO TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -5608,6 +6180,47 @@ def @DiagSetup
               #       270-360  { [XCTR] }
               # TCTR LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent radius "ldiagvhcurvepath"
+              # CTR     := { {xcoord from??CTR} {ycoord to??CTR} }
+              # FANG    := from??CTR angleto CTR
+              # TANG    := to??CTR angleto CTR
+              # FROM    :: from boundaryatangle FANG
+              # ++ {arrow @FromArrowLength backarrowlength} atangle FANG
+              # FROM    :< FANG
+              # TO      :: to boundaryatangle TANG
+              # ++ {arrow @ToArrowLength arrowlength} atangle TANG
+              # TO      :< TANG + 180d
+              # FDIST   := FROM distance CTR
+              # TDIST   := TO distance CTR
+              # RADIUS  := radius min FDIST min TDIST 
+              # XINDENT := xindent min { FDIST - RADIUS }
+              # ZINDENT := zindent min { TDIST - RADIUS }
+              # LFROM   :: FROM ++ XINDENT atangle FANG
+              # LFROM   :< FROM@ANGLE
+              # LTO     :: TO ++ ZINDENT atangle TANG
+              # LTO     :< TO@ANGLE
+              # FCTR    := CTR ++ RADIUS atangle { FROM@ANGLE + 180d }
+              # TCTR    := CTR ++ RADIUS atangle { TO@ANGLE          }
+              # XCTR    := CTR ++ RADIUS atangle { FROM@ANGLE + 180d }
+              #                ++ RADIUS atangle { TO@ANGLE }
+              # LMID    :: XCTR ++ RADIUS atangle { XCTR angleto CTR }
+              # LMID    :< FCTR angleto TCTR
+              # FROM LFROM FCTR
+              #     { FCTR angleto TCTR } quadcase
+              #       0        {   }
+              #       0-90     { [XCTR clockwise] }
+              #       90       {   }
+              #       90-180   { [XCTR] }
+              #       180      {   }
+              #       180-270  { [XCTR clockwise] }
+              #       270      {   }
+              #       270-360  { [XCTR] }
+              # TCTR LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5617,6 +6230,33 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent "ldiaghvlinepath"
+              # CTR     := { {xcoord to??CTR} {ycoord from??CTR} }
+              # FANG    := from??CTR angleto CTR
+              # TANG    := to??CTR angleto CTR
+              # FROM    :: from boundaryatangle FANG
+              # ++ {arrow @FromArrowLength backarrowlength} atangle FANG
+              # FROM    :< FANG
+              # TO      :: to boundaryatangle TANG
+              # ++ {arrow @ToArrowLength arrowlength} atangle TANG
+              # TO      :< TANG + 180d
+              # FDIST   := FROM distance CTR
+              # TDIST   := TO distance CTR
+              # XINDENT := xindent min FDIST
+              # ZINDENT := zindent min TDIST
+              # LFROM   :: FROM ++ XINDENT atangle FANG
+              # LFROM   :< FROM@ANGLE
+              # LTO     :: TO ++ ZINDENT atangle TANG
+              # LTO     :< TO@ANGLE
+              # LMID    :: CTR 
+              # LMID    :< {1f atangle {FANG + 180d}} angleto
+              #            {1f atangle {TANG + 180d}}
+              # FROM LFROM LMID LTO TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -5692,6 +6332,47 @@ def @DiagSetup
               #       270-360  { [XCTR clockwise] }
               # TCTR LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent radius "ldiaghvcurvepath"
+              # CTR     := { {xcoord to??CTR} {ycoord from??CTR} }
+              # FANG    := from??CTR angleto CTR
+              # TANG    := to??CTR angleto CTR
+              # FROM    :: from boundaryatangle FANG
+              # ++ {arrow @FromArrowLength backarrowlength} atangle FANG
+              # FROM    :< FANG
+              # TO      :: to boundaryatangle TANG
+              # ++ {arrow @ToArrowLength arrowlength} atangle TANG
+              # TO      :< TANG + 180d
+              # FDIST   := FROM distance CTR
+              # TDIST   := TO distance CTR
+              # RADIUS  := radius min FDIST min TDIST 
+              # XINDENT := xindent min { FDIST - RADIUS }
+              # ZINDENT := zindent min { TDIST - RADIUS }
+              # LFROM   :: FROM ++ XINDENT atangle FANG
+              # LFROM   :< FROM@ANGLE
+              # LTO     :: TO ++ ZINDENT atangle TANG
+              # LTO     :< TO@ANGLE
+              # FCTR    := CTR ++ RADIUS atangle { FROM@ANGLE + 180d }
+              # TCTR    := CTR ++ RADIUS atangle { TO@ANGLE          }
+              # XCTR    := CTR ++ RADIUS atangle { FROM@ANGLE + 180d }
+              #                ++ RADIUS atangle { TO@ANGLE }
+              # LMID    :: XCTR ++ RADIUS atangle { XCTR angleto CTR }
+              # LMID    :< FCTR angleto TCTR
+              # FROM LFROM FCTR
+              #     { FCTR angleto TCTR } quadcase
+              #       0        {   }
+              #       0-90     { [XCTR] }
+              #       90       {   }
+              #       90-180   { [XCTR clockwise] }
+              #       180      {   }
+              #       180-270  { [XCTR] }
+              #       270      {   }
+              #       270-360  { [XCTR clockwise] }
+              # TCTR LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5701,6 +6382,33 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias "ldiaglvrlinepath"
+              # FROM    :: from boundaryatangle 180d
+              # ++ {arrow @FromArrowLength backarrowlength} atangle 180d
+              # FROM    :< 180d
+              # TO      :: to boundaryatangle 180d
+              # ++ {arrow @ToArrowLength arrowlength} atangle 180d
+              # TO      :< 0d
+              # XLEFT   := {{xcoord FROM} min {xcoord TO}} - bias
+              # P1      :: { XLEFT ycoord FROM }
+              # P2      :: { XLEFT ycoord TO   }
+              # VERT    := P1 angleto P2
+              # P1      :< P1 angleto {P1++{1f atangle 180d}++{1f atangle VERT}}
+              # P2      :< P2 angleto {P2++{1f atangle 0d}  ++{1f atangle VERT}}
+              # LMID    :: P1 ** 0.5 ++ P2 ** 0.5
+              # LMID    :< VERT
+              # XINDENT := xindent min {FROM distance P1}
+              # ZINDENT := zindent min {P2   distance TO}
+              # LFROM   :: FROM -- { XINDENT 0 }
+              # LFROM   :< 180d
+              # LTO     :: TO -- { ZINDENT 0 }
+              # LTO     :< 0d
+              # FROM LFROM P1 LMID P2 LTO TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -5779,6 +6487,50 @@ def @DiagSetup
               #     270 { [XP2CTR] P2 [XP2CTR] }
               # XP2POST LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias radius "ldiaglvrcurvepath"
+              # FROM    :: from boundaryatangle 180d
+              # ++ {arrow @FromArrowLength backarrowlength} atangle 180d
+              # FROM    :< 180d
+              # TO      :: to boundaryatangle 180d
+              # ++ {arrow @ToArrowLength arrowlength} atangle 180d
+              # TO      :< 0d
+              # XLEFT   := {{xcoord FROM} min {xcoord TO}} - bias
+              # XP1     := { XLEFT ycoord FROM }
+              # XP2     := { XLEFT ycoord TO   }
+              # VERT    := XP1 angleto XP2
+              # LMID    :: XP1 ** 0.5 ++ XP2 ** 0.5
+              # LMID    :< VERT
+              # XINDENT := xindent min {FROM distance XP1}
+              # ZINDENT := zindent min {XP2   distance TO}
+              # LFROM   :: FROM -- { XINDENT 0 }
+              # LFROM   :< 180d
+              # LTO     :: TO -- { ZINDENT 0 }
+              # LTO     :< 0d
+              # RADIUS  := radius min { { XP1 distance XP2 } / 2 }
+              # XP1PRE  := XP1 ++ { RADIUS atangle 0d }
+              # XP1POST := XP1 ++ { RADIUS atangle VERT }
+              # XP1CTR  := XP1PRE ++ { RADIUS atangle VERT }
+              # P1      :: XP1CTR ++ { RADIUS atangle { XP1CTR angleto XP1 } }
+              # P1      :< XP1PRE angleto XP1POST
+              # XP2PRE  := XP2 -- { RADIUS atangle VERT }
+              # XP2POST := XP2 ++ { RADIUS atangle 0d }
+              # XP2CTR  := XP2PRE ++ { RADIUS atangle 0d }
+              # P2      :: XP2CTR ++ { RADIUS atangle { XP2CTR angleto XP2 } }
+              # P2      :< XP2PRE angleto XP2POST
+              # FROM LFROM XP1PRE
+              #   {round VERT} quadcase
+              #     90 { [XP1CTR clockwise] P1 [XP1CTR clockwise] }
+              #     270 { [XP1CTR] P1 [XP1CTR] }
+              # XP1POST LMID XP2PRE
+              #   {round VERT} quadcase
+              #     90 { [XP2CTR clockwise] P2 [XP2CTR clockwise] }
+              #     270 { [XP2CTR] P2 [XP2CTR] }
+              # XP2POST LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5788,6 +6540,33 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias "ldiagrvllinepath"
+              # FROM    :: from boundaryatangle 0d
+              # ++ {arrow @FromArrowLength backarrowlength} atangle 0d
+              # FROM    :< 0d
+              # TO      :: to boundaryatangle 0d
+              # ++ {arrow @ToArrowLength arrowlength} atangle 0d
+              # TO      :< 180d
+              # XRIGHT  := {{xcoord FROM} max {xcoord TO}} + bias
+              # P1      :: { XRIGHT ycoord FROM }
+              # P2      :: { XRIGHT ycoord TO   }
+              # VERT    := P1 angleto P2
+              # P1      :< P1 angleto {P1++{1f atangle 0d}  ++{1f atangle VERT}}
+              # P2      :< P2 angleto {P2++{1f atangle 180d}++{1f atangle VERT}}
+              # LMID    :: P1 ** 0.5 ++ P2 ** 0.5
+              # LMID    :< VERT
+              # XINDENT := xindent min {FROM distance P1}
+              # ZINDENT := zindent min {P2   distance TO}
+              # LFROM   :: FROM ++ { XINDENT 0 }
+              # LFROM   :< 0d
+              # LTO     :: TO ++ { ZINDENT 0 }
+              # LTO     :< 180d
+              # FROM LFROM P1 LMID P2 LTO TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -5866,6 +6645,50 @@ def @DiagSetup
               #     270 { [XP2CTR clockwise] P2 [XP2CTR clockwise] }
               # XP2POST LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias radius "ldiagrvlcurvepath"
+              # FROM    :: from boundaryatangle 0d
+              # ++ {arrow @FromArrowLength backarrowlength} atangle 0d
+              # FROM    :< 0d
+              # TO      :: to boundaryatangle 0d
+              # ++ {arrow @ToArrowLength arrowlength} atangle 0d
+              # TO      :< 180d
+              # XRIGHT  := {{xcoord FROM} max {xcoord TO}} + bias
+              # XP1     := { XRIGHT ycoord FROM }
+              # XP2     := { XRIGHT ycoord TO   }
+              # VERT    := XP1 angleto XP2
+              # LMID    :: XP1 ** 0.5 ++ XP2 ** 0.5
+              # LMID    :< VERT
+              # XINDENT := xindent min {FROM distance XP1}
+              # ZINDENT := zindent min {XP2   distance TO}
+              # LFROM   :: FROM ++ { XINDENT 0 }
+              # LFROM   :< 0d
+              # LTO     :: TO ++ { ZINDENT 0 }
+              # LTO     :< 180d
+              # RADIUS  := radius min { { XP1 distance XP2 } * 0.5 }
+              # XP1PRE  := XP1 ++ { RADIUS atangle 180d }
+              # XP1POST := XP1 ++ { RADIUS atangle VERT }
+              # XP1CTR  := XP1PRE ++ { RADIUS atangle VERT }
+              # P1      :: XP1CTR ++ { RADIUS atangle { XP1CTR angleto XP1 } }
+              # P1      :< XP1PRE angleto XP1POST
+              # XP2PRE  := XP2 -- { RADIUS atangle VERT }
+              # XP2POST := XP2 ++ { RADIUS atangle 180d }
+              # XP2CTR  := XP2PRE ++ { RADIUS atangle 180d }
+              # P2      :: XP2CTR ++ { RADIUS atangle { XP2CTR angleto XP2 } }
+              # P2      :< XP2PRE angleto XP2POST
+              # FROM LFROM XP1PRE
+              #   {round VERT} quadcase
+              #     90 { [XP1CTR] P1 [XP1CTR] }
+              #     270 { [XP1CTR clockwise] P1 [XP1CTR clockwise] }
+              # XP1POST LMID XP2PRE
+              #   {round VERT} quadcase
+              #     90 { [XP2CTR] P2 [XP2CTR] }
+              #     270 { [XP2CTR clockwise] P2 [XP2CTR clockwise] }
+              # XP2POST LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5876,6 +6699,12 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias "ldiagdhulinepath"
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -5895,6 +6724,12 @@ def @DiagSetup
 	      "{" from "}" "{" to "}"
 	      xindent zindent bias radius "ldiagdhucurvepath"
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias radius "ldiagdhucurvepath"
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5904,6 +6739,12 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias "ldiaguhdlinepath"
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -5923,6 +6764,12 @@ def @DiagSetup
 	      "{" from "}" "{" to "}"
 	      xindent zindent bias radius "ldiaguhdcurvepath"
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias radius "ldiaguhdcurvepath"
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -5933,6 +6780,35 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent hfrac hbias "ldiaghvhlinepath"
+	      # FRDIRN  := {{from??CTR angleto to??CTR} quadcase
+	      #     0 { 0d } 0-90 { 0d } 90 { 0d } 90-180 { 180d }
+	      #	    180 { 180d } 180-270 { 180d } 270 { 180d } 270-360 { 0d }}
+	      # TODIRN  := {FRDIRN + 180d}
+	      # FROM    :: from boundaryatangle FRDIRN ++
+	      #     {arrow @FromArrowLength backarrowlength} atangle FRDIRN
+	      # FROM    :< FRDIRN
+	      # TO      :: to boundaryatangle TODIRN ++
+	      #	    {arrow @ToArrowLength arrowlength} atangle TODIRN
+	      # TO      :< FRDIRN
+	      # BIAS    := abs { xcoord FROM - xcoord TO } * hfrac + hbias
+	      # P1      :: FROM ++ BIAS atangle FRDIRN
+	      # P2      :: { xcoord P1 ycoord TO }
+	      # LMID    :: { P1 ** 0.5 ++ P2 ** 0.5 }
+	      # LMID    :< P1 angleto P2
+	      # XINDENT := xindent min {FROM distance P1}
+	      # ZINDENT := zindent min {P2 distance TO}
+	      # LFROM   :: FROM ++ {XINDENT atangle FRDIRN}
+	      # LFROM   :< FRDIRN
+	      # LTO     :: TO ++ {ZINDENT atangle TODIRN}
+	      # LTO     :< FRDIRN
+	      # FROM LFROM P1 LMID P2 LTO TO
+
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -6016,6 +6892,53 @@ def @DiagSetup
 	      # XP2PRE [XP2CTR P2GO] P2 [XP2CTR P2GO] XP2POST
 	      # LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent hfrac hbias radius "ldiaghvhcurvepath"
+	      # FRDIRN  := {{from??CTR angleto to??CTR} quadcase
+	      #     0 { 0d } 0-90 { 0d } 90 { 0d } 90-180 { 180d }
+	      #     180 { 180d } 180-270 { 180d } 270 { 180d } 270-360 { 0d }}
+	      # TODIRN  := {FRDIRN + 180d}
+	      # FROM    :: from boundaryatangle FRDIRN ++
+	      #     {arrow @FromArrowLength backarrowlength} atangle FRDIRN
+	      # FROM    :< FRDIRN
+	      # TO      :: to boundaryatangle TODIRN ++
+	      #     {arrow @ToArrowLength arrowlength} atangle TODIRN
+	      # TO      :< FRDIRN
+	      # BIAS    := abs { xcoord FROM - xcoord TO } * hfrac + hbias
+	      # XP1     := FROM ++ BIAS atangle FRDIRN
+	      # XP2     := { xcoord XP1 ycoord TO }
+	      # LMID    :: { XP1 ** 0.5 ++ XP2 ** 0.5 }
+	      # VERT    := round { XP1 angleto XP2 }
+	      # LMID    :< VERT
+	      # XINDENT := xindent min {FROM distance XP1}
+	      # ZINDENT := zindent min {XP2 distance TO}
+	      # LFROM   :: FROM ++ {XINDENT atangle FRDIRN}
+	      # LFROM   :< FRDIRN
+	      # LTO     :: TO ++ {ZINDENT atangle TODIRN}
+	      # LTO     :< FRDIRN
+	      # RADIUS  := radius min { { XP1 distance XP2 } / 2 }
+	      # XP1PRE  := XP1 ++ { RADIUS atangle TODIRN }
+	      # XP1POST := XP1 ++ { RADIUS atangle VERT }
+	      # XP1CTR  := XP1PRE ++ { RADIUS atangle VERT }
+	      # P1      :: XP1CTR ++ { RADIUS atangle { XP1CTR angleto XP1 } }
+	      # P1      :< XP1PRE angleto XP1POST
+	      # XP2PRE  := XP2 -- { RADIUS atangle VERT }
+	      # XP2POST := XP2 ++ { RADIUS atangle FRDIRN }
+	      # XP2CTR  := XP2POST -- { RADIUS atangle VERT }
+	      # P2      :: XP2CTR ++ { RADIUS atangle { XP2CTR angleto XP2 } }
+	      # P2      :< XP2PRE angleto XP2POST
+	      # if cond { {VERT - FRDIRN} = 90 }
+	      # then { P1GO := "anticlockwise" P2GO := "clockwise" }
+	      # else { P1GO := "clockwise" P2GO := "anticlockwise" }
+	      # FROM LFROM
+	      # XP1PRE [XP1CTR P1GO] P1 [XP1CTR P1GO] XP1POST
+	      # LMID
+	      # XP2PRE [XP2CTR P2GO] P2 [XP2CTR P2GO] XP2POST
+	      # LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -6025,6 +6948,33 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent hfrac hbias "ldiagvhvlinepath"
+              # FROM    :: from boundaryatangle 0d
+              # ++ {arrow @FromArrowLength backarrowlength} atangle 0d
+              # FROM    :< 0d
+              # TO      :: to boundaryatangle 0d
+              # ++ {arrow @ToArrowLength arrowlength} atangle 0d
+              # TO      :< 180d
+              # XRIGHT  := {{xcoord FROM} max {xcoord TO}} + bias
+              # P1      :: { XRIGHT ycoord FROM }
+              # P2      :: { XRIGHT ycoord TO   }
+              # VERT    := P1 angleto P2
+              # P1      :< P1 angleto {P1++{1f atangle 0d}  ++{1f atangle VERT}}
+              # P2      :< P2 angleto {P2++{1f atangle 180d}++{1f atangle VERT}}
+              # LMID    :: P1 ** 0.5 ++ P2 ** 0.5
+              # LMID    :< VERT
+              # XINDENT := xindent min {FROM distance P1}
+              # ZINDENT := zindent min {P2   distance TO}
+              # LFROM   :: FROM ++ { XINDENT 0 }
+              # LFROM   :< 0d
+              # LTO     :: TO ++ { ZINDENT 0 }
+              # LTO     :< 180d
+              # FROM LFROM P1 LMID P2 LTO TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -6108,6 +7058,55 @@ def @DiagSetup
 	      # XP2PRE [XP2CTR P2GO] P2 [XP2CTR P2GO] XP2POST
 	      # LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent hfrac hbias radius "ldiagvhvcurvepath"
+	      # /FRDIRN [ { 0 dg } { 180 dg } { 180 dg } { 0 dg }
+	      #     { 0 dg } { 0 dg } { 180 dg } { 180 dg }
+	      #     from (CTR) ldiagdolabel to (CTR) ldiagdolabel
+	      #     ldiagangleto ldiagquadcase ] cvx def
+	      # /TODIRN [ FRDIRN 180 dg add ] cvx def
+	      #     from (CTR) ldiagdolabel FRDIRN from (CIRCUM) ldiagdolabel ldiagpadd
+	      #     0 0 fromarrowlength FRDIRN ldiagatangle ldiagpadd /FROM ldiagpointdef
+	      # FRDIRN /FROM@ANGLE ldiagangledef
+	      # to (CTR) ldiagdolabel TODIRN to (CIRCUM) ldiagdolabel ldiagpadd
+	      # 0 0 toarrowlength TODIRN ldiagatangle ldiagpadd /TO ldiagpointdef
+	      # FRDIRN /TO@ANGLE ldiagangledef
+	      # /BIAS [ FROM pop TO pop sub abs hfrac mul hbias add ] cvx def
+	      # /XP1 [ FROM 0 0 BIAS FRDIRN ldiagatangle ldiagpadd ] cvx def
+	      # /XP2 [ XP1 pop TO exch pop ] cvx def
+	      # XP1 0.5 ldiagpmul XP2 0.5 ldiagpmul ldiagpadd /LMID ldiagpointdef
+	      # /VERT [ XP1 XP2 ldiagangleto round ] cvx def
+	      # VERT /LMID@ANGLE ldiagangledef
+	      # /XINDENT [ xindent FROM XP1 ldiagdistance ldiagmin ] cvx def
+	      # /ZINDENT [ zindent XP2 TO ldiagdistance ldiagmin ] cvx def
+	      # FROM 0 0 XINDENT FRDIRN ldiagatangle ldiagpadd /LFROM ldiagpointdef
+	      # FRDIRN /LFROM@ANGLE ldiagangledef
+	      # TO 0 0 ZINDENT TODIRN ldiagatangle ldiagpadd /LTO ldiagpointdef
+	      # FRDIRN /LTO@ANGLE ldiagangledef
+	      # /RADIUS [ radius XP1 XP2 ldiagdistance 2 div ldiagmin ] cvx def
+	      # /XP1PRE [ XP1 0 0 RADIUS TODIRN ldiagatangle ldiagpadd ] cvx def
+	      # /XP1POST [ XP1 0 0 RADIUS VERT ldiagatangle ldiagpadd ] cvx def
+	      # /XP1CTR [ XP1PRE 0 0 RADIUS VERT ldiagatangle ldiagpadd ] cvx def
+	      # XP1CTR 0 0 RADIUS XP1CTR XP1 ldiagangleto ldiagatangle ldiagpadd /P1 ldiagpointdef
+	      # XP1PRE XP1POST ldiagangleto /P1@ANGLE ldiagangledef
+	      # /XP2PRE [ 0 0 RADIUS VERT ldiagatangle XP2 ldiagpsub ] cvx def
+	      # /XP2POST [ XP2 0 0 RADIUS FRDIRN ldiagatangle ldiagpadd ] cvx def
+	      # /XP2CTR [ 0 0 RADIUS VERT ldiagatangle XP2POST ldiagpsub ] cvx def
+	      # XP2CTR 0 0 RADIUS XP2CTR XP2 ldiagangleto ldiagatangle ldiagpadd /P2 ldiagpointdef
+	      # XP2PRE XP2POST ldiagangleto /P2@ANGLE ldiagangledef
+	      # VERT FRDIRN sub 90 eq
+	      # { /P1GO [ anticlockwise ] cvx def /P2GO [ clockwise ] cvx def }
+	      # { /P1GO [ clockwise ] cvx def /P2GO [ anticlockwise ] cvx def }
+	      # ifelse
+	      # FROM LFROM
+	      # XP1PRE [XP1CTR P1GO] P1 [XP1CTR P1GO] XP1POST
+	      # LMID
+	      # XP2PRE [XP2CTR P2GO] P2 [XP2CTR P2GO] XP2POST
+	      # LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -6117,6 +7116,40 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias fbias tbias "ldiagdwraplinepath"
+              # DIRN	:= if cond { xcoord from??CTR < xcoord to??CTR }
+              # 	      then { 180d } else { 0d }
+              # FROM	:: from boundaryatangle DIRN
+              # ++ {arrow @FromArrowLength backarrowlength} atangle DIRN
+              # FROM	:< DIRN
+              # TO	:: to boundaryatangle { DIRN + 180d }
+              # ++ {arrow @ToArrowLength arrowlength} atangle { DIRN + 180d }
+              # TO	:< DIRN
+              # P1	:: FROM ++ {fbias max 0} atangle DIRN
+              # P1	:< if cond { DIRN = 180d } then { 225d } else { -45d }
+              # P4	:: TO ++ {tbias max 0} atangle { DIRN + 180d }
+              # P4	:< if cond { DIRN = 180d } then { 135d } else { 45d }
+              # YC	:= ycoord { from boundaryatangle 270d } min
+              # 	   ycoord { to   boundaryatangle 270d }
+              # 	   - { bias max 0 }
+              # P2	:: { xcoord P1 YC }
+              # P2	:< P4@ANGLE - 180d
+              # P3	:: { xcoord P4 YC }
+              # P3	:< P1@ANGLE - 180d
+              # XINDENT	:= xindent min { FROM distance P1 }
+              # LFROM	:: FROM ++ XINDENT atangle DIRN
+              # LFROM	:< FROM@ANGLE
+              # ZINDENT	:= zindent min { TO distance P4 }
+              # LTO	:: TO ++ ZINDENT atangle { DIRN + 180d }
+              # LTO	:< TO@ANGLE
+              # LMID	:: P2 ** 0.5 ++ P3 ** 0.5
+              # LMID	:< DIRN - 180d
+              # FROM P1 P2 P3 P4 TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -6233,6 +7266,81 @@ def @DiagSetup
               # XP4PRE [XP4CTR CLOCK] XP4POST
               # LTO TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias fbias tbias radius "ldiagdwrapcurvepath"
+              # DIRN	:= if cond { xcoord from??CTR < xcoord to??CTR }
+              # 	      then { 180d } else { 0d }
+              # CLOCK	:= if cond { xcoord from??CTR < xcoord to??CTR }
+              # 	      then { anticlockwise } else { clockwise }
+              # FROM	:: from boundaryatangle DIRN
+              # ++ {arrow @FromArrowLength backarrowlength} atangle DIRN
+              # FROM	:< DIRN
+              # TO	:: to boundaryatangle { DIRN + 180d }
+              # ++ {arrow @ToArrowLength arrowlength} atangle { DIRN + 180d }
+              # TO	:< DIRN
+              #
+              # XP1	:= FROM ++ {fbias max 0} atangle DIRN
+              # XP4	:= TO ++ {tbias max 0} atangle { DIRN + 180d }
+              # YC	:= ycoord { from boundaryatangle 270d } min
+              # 	   ycoord { to   boundaryatangle 270d }
+              # 	   - { bias max 0 }
+              # XP2	:= { xcoord XP1 YC }
+              # XP3	:= { xcoord XP4 YC }
+              #
+              # RP1	:= radius min { XP1 distance FROM } min
+              # 	   { { XP1 distance XP2 } / 2 }
+              # XP1PRE	:= XP1 ++ RP1 atangle { XP1 angleto FROM }
+              # XP1POST := XP1 ++ RP1 atangle { XP1 angleto XP2  }
+              # XP1CTR  := XP1PRE ++ RP1 atangle { XP1 angleto XP2  }
+              # P1	:: XP1CTR ++ RP1 atangle { XP1CTR angleto XP1 }
+              # P1	:< XP1CTR angleto P1 + DIRN - 90d
+              #
+              # RP2	:= radius min { { XP1 distance XP2 } / 2 }
+              # 	     min { { XP2 distance XP3 } / 2 }
+              # XP2PRE	:= XP2 ++ RP2 atangle { XP2 angleto XP1 }
+              # XP2POST	:= XP2 ++ RP2 atangle { XP2 angleto XP3 }
+              # XP2CTR	:= XP2PRE ++ RP2 atangle { XP2 angleto XP3 }
+              # P2	:: XP2CTR ++ RP2 atangle { XP2CTR angleto XP2 }
+              # P2	:< XP2CTR angleto P2 + DIRN - 90d
+              #
+              # RP3	:= radius min { { XP2 distance XP3 } / 2 }
+              # 	     min { { XP3 distance XP4 } / 2 }
+              # XP3PRE	:= XP3 ++ RP3 atangle { XP3 angleto XP2 }
+              # XP3POST	:= XP3 ++ RP3 atangle { XP3 angleto XP4 }
+              # XP3CTR	:= XP3PRE ++ RP3 atangle { XP3 angleto XP4 }
+              # P3	:: XP3CTR ++ RP3 atangle { XP3CTR angleto XP3 }
+              # P3	:< XP3CTR angleto P3 + DIRN - 90d
+              #
+              # RP4	:= radius min { { XP4 distance XP3 } / 2 }
+              # 	     min { XP4 distance TO }
+              # XP4PRE	:= XP4 ++ RP4 atangle { XP4 angleto XP3 }
+              # XP4POST := XP4 ++ RP4 atangle { XP4 angleto TO  }
+              # XP4CTR  := XP4PRE ++ RP4 atangle { XP4 angleto TO  }
+              # P4	:: XP4CTR ++ RP4 atangle { XP4CTR angleto XP4 }
+              # P4	:< XP4CTR angleto P4 + DIRN - 90d
+              #
+              # XINDENT	:= xindent min { FROM distance XP1PRE }
+              # LFROM	:: FROM ++ XINDENT atangle DIRN
+              # LFROM	:< FROM@ANGLE
+              #
+              # LMID	:: XP2 ** 0.5 ++ XP3 ** 0.5
+              # LMID	:< DIRN - 180d
+              #
+              # ZINDENT	:= zindent min { TO distance XP4POST }
+              # LTO	:: TO ++ ZINDENT atangle { DIRN + 180d }
+              # LTO	:< TO@ANGLE
+              #
+              # FROM LFROM
+              # XP1PRE [XP1CTR CLOCK] XP1POST
+              # XP2PRE [XP2CTR CLOCK] XP2POST
+              # LMID
+              # XP3PRE [XP3CTR CLOCK] XP3POST
+              # XP4PRE [XP4CTR CLOCK] XP4POST
+              # LTO TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -6275,6 +7383,40 @@ def @DiagSetup
               # LMID	:< DIRN - 180d
               # FROM P1 P2 P3 P4 TO
 		  }
+		  SVG        @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias fbias tbias "ldiaguwraplinepath"
+              # DIRN	:= if cond { xcoord from??CTR < xcoord to??CTR }
+              # 	      then { 180d } else { 0d }
+              # FROM	:: from boundaryatangle DIRN
+              # ++ {arrow @FromArrowLength backarrowlength} atangle DIRN
+              # FROM	:< DIRN
+              # TO	:: to boundaryatangle { DIRN + 180d }
+              # ++ {arrow @ToArrowLength arrowlength} atangle { DIRN + 180d }
+              # TO	:< DIRN
+              # P1	:: FROM ++ {fbias max 0} atangle DIRN
+              # P1	:< if cond { DIRN = 180d } then { 135d } else { 45d }
+              # P4	:: TO ++ {tbias max 0} atangle { DIRN + 180d }
+              # P4	:< if cond { DIRN = 180d } then { 225d } else { -45d }
+              # YC	:= ycoord { from boundaryatangle 90d } max
+              # 	   ycoord { to   boundaryatangle 90d }
+              # 	   + { bias max 0 }
+              # P2	:: { xcoord P1 YC }
+              # P2	:< P4@ANGLE - 180d
+              # P3	:: { xcoord P4 YC }
+              # P3	:< P1@ANGLE - 180d
+              # XINDENT	:= xindent min { FROM distance P1 }
+              # LFROM	:: FROM ++ XINDENT atangle DIRN
+              # LFROM	:< FROM@ANGLE
+              # ZINDENT	:= zindent min { TO distance P4 }
+              # LTO	:: TO ++ ZINDENT atangle { DIRN + 180d }
+              # LTO	:< TO@ANGLE
+              # LMID	:: P2 ** 0.5 ++ P3 ** 0.5
+              # LMID	:< DIRN - 180d
+              # FROM P1 P2 P3 P4 TO
+		  }
 		  PDF @Yield {}
 		}
 	    }
@@ -6284,6 +7426,81 @@ def @DiagSetup
 	    {
 		@BackEnd @Case {
 		  PostScript @Yield {
+	      {arrow @FromArrowLength backarrowlength}
+	      {arrow @ToArrowLength arrowlength}
+	      "{" from "}" "{" to "}"
+	      xindent zindent bias fbias tbias radius "ldiaguwrapcurvepath"
+              # DIRN	:= if cond { xcoord from??CTR < xcoord to??CTR }
+              # 	      then { 180d } else { 0d }
+              # CLOCK	:= if cond { xcoord from??CTR < xcoord to??CTR }
+              # 	      then { clockwise } else { anticlockwise }
+              # FROM	:: from boundaryatangle DIRN
+              # ++ {arrow @FromArrowLength backarrowlength} atangle DIRN
+              # FROM	:< DIRN
+              # TO	:: to boundaryatangle { DIRN + 180d }
+              # ++ {arrow @ToArrowLength arrowlength} atangle { DIRN + 180d }
+              # TO	:< DIRN
+              #
+              # XP1	:= FROM ++ {fbias max 0} atangle DIRN
+              # XP4	:= TO ++ {tbias max 0} atangle { DIRN + 180d }
+              # YC	:= ycoord { from boundaryatangle 90d } max
+              # 	   ycoord { to   boundaryatangle 90d }
+              # 	   + { bias max 0 }
+              # XP2	:= { xcoord XP1 YC }
+              # XP3	:= { xcoord XP4 YC }
+              #
+              # RP1	:= radius min { XP1 distance FROM } min
+              # 	   { { XP1 distance XP2 } / 2 }
+              # XP1PRE	:= XP1 ++ RP1 atangle { XP1 angleto FROM }
+              # XP1POST := XP1 ++ RP1 atangle { XP1 angleto XP2  }
+              # XP1CTR  := XP1PRE ++ RP1 atangle { XP1 angleto XP2  }
+              # P1	:: XP1CTR ++ RP1 atangle { XP1CTR angleto XP1 }
+              # P1	:< XP1CTR angleto P1 + DIRN + 90d
+              #
+              # RP2	:= radius min { { XP1 distance XP2 } / 2 }
+              # 	     min { { XP2 distance XP3 } / 2 }
+              # XP2PRE	:= XP2 ++ RP2 atangle { XP2 angleto XP1 }
+              # XP2POST	:= XP2 ++ RP2 atangle { XP2 angleto XP3 }
+              # XP2CTR	:= XP2PRE ++ RP2 atangle { XP2 angleto XP3 }
+              # P2	:: XP2CTR ++ RP2 atangle { XP2CTR angleto XP2 }
+              # P2	:< XP2CTR angleto P2 + DIRN + 90d
+              #
+              # RP3	:= radius min { { XP2 distance XP3 } / 2 }
+              # 	     min { { XP3 distance XP4 } / 2 }
+              # XP3PRE	:= XP3 ++ RP3 atangle { XP3 angleto XP2 }
+              # XP3POST	:= XP3 ++ RP3 atangle { XP3 angleto XP4 }
+              # XP3CTR	:= XP3PRE ++ RP3 atangle { XP3 angleto XP4 }
+              # P3	:: XP3CTR ++ RP3 atangle { XP3CTR angleto XP3 }
+              # P3	:< XP3CTR angleto P3 + DIRN + 90d
+              #
+              # RP4	:= radius min { { XP4 distance XP3 } / 2 }
+              # 	     min { XP4 distance TO }
+              # XP4PRE	:= XP4 ++ RP4 atangle { XP4 angleto XP3 }
+              # XP4POST := XP4 ++ RP4 atangle { XP4 angleto TO  }
+              # XP4CTR  := XP4PRE ++ RP4 atangle { XP4 angleto TO  }
+              # P4	:: XP4CTR ++ RP4 atangle { XP4CTR angleto XP4 }
+              # P4	:< XP4CTR angleto P4 + DIRN + 90d
+              #
+              # XINDENT	:= xindent min { FROM distance XP1PRE }
+              # LFROM	:: FROM ++ XINDENT atangle DIRN
+              # LFROM	:< FROM@ANGLE
+              #
+              # LMID	:: XP2 ** 0.5 ++ XP3 ** 0.5
+              # LMID	:< DIRN - 180d
+              #
+              # ZINDENT	:= zindent min { TO distance XP4POST }
+              # LTO	:: TO ++ ZINDENT atangle { DIRN + 180d }
+              # LTO	:< TO@ANGLE
+              #
+              # FROM LFROM
+              # XP1PRE [XP1CTR CLOCK] XP1POST
+              # XP2PRE [XP2CTR CLOCK] XP2POST
+              # LMID
+              # XP3PRE [XP3CTR CLOCK] XP3POST
+              # XP4PRE [XP4CTR CLOCK] XP4POST
+              # LTO TO
+		  }
+		  SVG        @Yield {
 	      {arrow @FromArrowLength backarrowlength}
 	      {arrow @ToArrowLength arrowlength}
 	      "{" from "}" "{" to "}"
@@ -6466,6 +7683,23 @@ def @DiagSetup
 
 	  @BackEnd @Case {
 	    PostScript @Yield {
+
+	    @Null & # so that preceding space gets chewed up
+            {
+	      @Direct "ldiaglinkbegin" @ColourCommand pathcolour
+	      "[" @Path "]" pathdashlength "[" pathstyle "]" pathwidth "ldiaglinkend"
+            }
+            @Graphic
+            {
+		/ { fromlabel @Else @FromArrow}	@IfNonEmpty @FromLabel
+		/ { xlabel @Else linklabel }	@IfNonEmpty @XLabel
+		/ { ylabel @Else linklabel }	@IfNonEmpty @YLabel
+		/ { zlabel @Else linklabel }	@IfNonEmpty @ZLabel
+		/ { tolabel @Else @ToArrow }	@IfNonEmpty @ToLabel
+	    }
+
+	    }
+	    SVG        @Yield {
 
 	    @Null & # so that preceding space gets chewed up
             {
@@ -8163,6 +9397,21 @@ def @DiagSetup
 	{
 	    @BackEnd @Case {
 		PostScript @Yield {
+		{
+		    save @Case {
+			{ yes Yes } @Yield "grestore save gsave"
+			else @Yield {}
+		    }
+		    maxlabels "ldiagbegin"
+		    //
+		    "ldiagend"
+		    save @Case {
+			{ yes Yes } @Yield "restore"
+			else @Yield {}
+		    }
+		} @Graphic x }
+
+		SVG        @Yield {
 		{
 		    save @Case {
 			{ yes Yes } @Yield "grestore save gsave"

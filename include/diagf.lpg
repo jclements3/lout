@@ -3410,5 +3410,139 @@ ldiagdict begin
   LL
 } def
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                                                                    %
+%   SVG fallback arrowhead shapes                                    %
+%                                                                    %
+%   The procs below emit deliberately simpler point-only shape       %
+%   descriptions (no curve / arc / array markers) so that the C-side %
+%   SVG interpreter in z53.c can render them robustly.  They are     %
+%   referenced from the SVG @Yield branches of @SolidCurvedArrowHead %
+%   et al. in include/diagf.  PostScript output is unaffected (the   %
+%   procs are simply unused).                                        %
+%                                                                    %
+%   Each proc has the same call signature as its non-svg counterpart %
+%   and leaves an equivalent (but simpler) point list on the stack.  %
+%                                                                    %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% SVG fallback for @SolidArrowHead -- a plain filled triangle.
+% - ldiagsvgsolidarrowhead -
+/ldiagsvgsolidarrowhead
+{
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 0
+} def
+
+% SVG fallback for @SolidWithBarArrowHead -- triangle with a stub on the back.
+% <pathwidth> ldiagsvgsolidwithbararrowhead -
+/ldiagsvgsolidwithbararrowhead
+{
+  /pathwidth exch def
+  /XBK [ xsize pathwidth 0.5 mul sub ] cvx def
+  /XFW [ xsize pathwidth 0.5 mul add ] cvx def
+  0 0
+  XBK ysize 0.5 mul
+  XBK 0
+  XFW 0
+  XFW ysize
+  XBK ysize
+  XBK ysize 0.5 mul
+  0 ysize
+  0 0
+} def
+
+% SVG fallback for @OpenArrowHead -- "V"-shaped open arrow.
+% Renders as two angled strokes forming a V, traced as a single closed
+% path so that even-odd/nonzero fill draws an open chevron.
+% <pathwidth> <pathgap> ldiagsvgopenarrowhead -
+/ldiagsvgopenarrowhead
+{
+  /pathgap exch def
+  /pathwidth exch def
+  /UPPER [ ysize 0.5 mul pathwidth 0.5 mul add ] cvx def
+  /LOWER [ ysize 0.5 mul pathwidth 0.5 mul sub ] cvx def
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 UPPER
+  xsize pathwidth 0.5 mul sub ysize 0.5 mul
+  0 LOWER
+  0 0
+} def
+
+% SVG fallback for @HalfOpenArrowHead -- like solid but with a small notch.
+% <pathwidth> <pathgap> ldiagsvghalfopenarrowhead -
+/ldiagsvghalfopenarrowhead
+{
+  /pathgap exch def
+  /pathwidth exch def
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 ysize 0.5 mul pathwidth 0.5 mul add
+  xsize 0.3 mul ysize 0.5 mul
+  0 ysize 0.5 mul pathwidth 0.5 mul sub
+  0 0
+} def
+
+% SVG fallback for @SolidCurvedArrowHead -- simple filled triangle.
+% The curved back edges of the PostScript version are approximated as
+% straight lines.  Acceptable visual fidelity, robust rendering.
+% - ldiagsvgsolidcurvedarrowhead -
+/ldiagsvgsolidcurvedarrowhead
+{
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 0
+} def
+
+% SVG fallback for @OpenCurvedArrowHead -- V-shaped open arrow without arcs.
+% <pathwidth> <pathgap> ldiagsvgopencurvedarrowhead -
+/ldiagsvgopencurvedarrowhead
+{
+  /pathgap exch def
+  /pathwidth exch def
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 ysize 0.5 mul pathwidth 0.5 mul add
+  xsize pathwidth 0.5 mul sub ysize 0.5 mul
+  0 ysize 0.5 mul pathwidth 0.5 mul sub
+  0 0
+} def
+
+% SVG fallback for @HalfOpenCurvedArrowHead -- triangle with notch.
+% <pathwidth> <pathgap> ldiagsvghalfopencurvedarrowhead -
+/ldiagsvghalfopencurvedarrowhead
+{
+  /pathgap exch def
+  /pathwidth exch def
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 ysize 0.5 mul pathwidth 0.5 mul add
+  xsize 0.3 mul ysize 0.5 mul
+  0 ysize 0.5 mul pathwidth 0.5 mul sub
+  0 0
+} def
+
+% SVG fallback for @ManyArrowHead -- a single filled triangle.  The PS
+% version draws three parallel arrows separated by [] sub-path markers,
+% which ldiagsetpath flattens into a confusing zig-zag.  A single
+% triangle is a much clearer fallback.
+% <pathwidth> ldiagsvgmanyarrowhead -
+/ldiagsvgmanyarrowhead
+{
+  /pathwidth exch def
+  0 0
+  xsize ysize 0.5 mul
+  0 ysize
+  0 0
+} def
+
 end
 %%EndResource

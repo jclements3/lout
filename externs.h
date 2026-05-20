@@ -487,6 +487,7 @@ typedef void *POINTER;
 #define	CH_FLAG_OPTION		'-'	/* the -- command line flag          */
 #define	CH_FLAG_WORDS		'w'	/* the -w command line flag          */
 #define	CH_FLAG_PDF		'Z'	/* the -Z command line flag	     */
+#define	CH_FLAG_SVG		'G'	/* the -G command line flag	     */
 
 #define	CH_SPACE		' '	/* space character                   */
 /* #define	CH_NEWLINE		'\n'*/ 	/* the newline character     */
@@ -582,6 +583,7 @@ typedef void *POINTER;
 #define	STR_POSTSCRIPT		AsciiToFull("PostScript")
 #define	STR_PLAINTEXT		AsciiToFull("PlainText")
 #define	STR_PDF			AsciiToFull("PDF")
+#define	STR_SVG			AsciiToFull("SVG")
 #define	STR_ELSE		AsciiToFull("else")
 #define	STR_NOCROSS		AsciiToFull("??")
 #define	STR_BADKEY		AsciiToFull("badkey")
@@ -2447,6 +2449,7 @@ typedef struct back_end_rec {
 #define POSTSCRIPT           0		/* PostScript back end               */
 #define	PDF		     1		/* PDF back end			     */
 #define	PLAINTEXT	     2		/* plain text back end               */
+#define	SVG		     3		/* SVG back end                      */
 
 /* error types */
 #define	INTERN		     0		/* internal error (i.e. bug)         */
@@ -3772,6 +3775,10 @@ extern	BOOLEAN	  PlainFormFeed;	/* true if using \f		     */
 /*****  z52.c	  Texture Service        **************************************/
 extern	BOOLEAN	  UseTexture;
 extern	void	  TextureInit(void);
+
+/*****  z53.c	  SVG back end          **************************************/
+extern	BACK_END  SVG_BackEnd;		/* SVG back end record               */
+extern	BACK_END  SVG_NullBackEnd;	/* SVG null back end record          */
 extern	void	  TextureChange(STYLE *style, OBJECT x);
 extern	FULL_CHAR *TextureCommand(TEXTURE_NUM pnum);
 

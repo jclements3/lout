@@ -311,10 +311,13 @@ def @Math
     def @Sym  precedence @MaxPrec right x { symbolfont @Font x }
 
     def @HLine
-	named line { @BackEnd @Case { PostScript @Yield { "0.05 ft setlinewidth" } PDF @Yield { "__mul(__loutf, 0.05) w" } } }
+	named line { @BackEnd @Case { PostScript @Yield { "0.05 ft setlinewidth" } SVG        @Yield { "0.05 ft setlinewidth" } PDF @Yield { "__mul(__loutf, 0.05) w" } } }
     {
 	@BackEnd @Case {
 	  PostScript @Yield {
+	    { "0 0 moveto xsize 0 lineto" line "stroke" } @Graphic {}
+	  }
+	  SVG        @Yield {
 	    { "0 0 moveto xsize 0 lineto" line "stroke" } @Graphic {}
 	  }
 	  PDF @Yield {	# note re-arrangement of commands (setlinewidth (='w') not allowed in a path)
@@ -327,6 +330,9 @@ def @Math
     {
 	@BackEnd @Case {
 	  PostScript @Yield {
+	    "0 0 moveto 0 ysize lineto 0.05 ft setlinewidth stroke" @Graphic {}
+	  }
+	  SVG        @Yield {
 	    "0 0 moveto 0 ysize lineto 0.05 ft setlinewidth stroke" @Graphic {}
 	  }
 	  PDF @Yield {
@@ -744,6 +750,10 @@ def @Math
 	      "0 ymark 0.16 ft sub moveto 0 ymark 0.16 ft add lineto stroke"
 	      @Graphic arrowright
 	    }
+	    SVG        @Yield {
+	      "0 ymark 0.16 ft sub moveto 0 ymark 0.16 ft add lineto stroke"
+	      @Graphic arrowright
+	    }
 	    PDF @Yield {
 		"0 __sub(__ymark, __mul(__loutf, 0.16)) m 0 __add(__ymark, __mul(__loutf, 0.16)) l S"
 		@Graphic arrowright
@@ -757,6 +767,10 @@ def @Math
 	@HContract @VContract {
 	  @BackEnd @Case {
 	    PostScript @Yield {
+		"0 ymark 0.16 ft sub moveto 0 ymark 0.16 ft add lineto stroke"
+		@Graphic { { 1.6 1 } @Scale arrowright }
+	    }
+	    SVG        @Yield {
 		"0 ymark 0.16 ft sub moveto 0 ymark 0.16 ft add lineto stroke"
 		@Graphic { { 1.6 1 } @Scale arrowright }
 	    }
@@ -774,6 +788,11 @@ def @Math
 	  @BackEnd @Case {
 
 	    PostScript @Yield {
+		"xsize ymark moveto xsize ymark 0.1 ft add 0.1 ft -90 90 arc stroke"
+		@Graphic leftarrow
+	    }
+
+	    SVG        @Yield {
 		"xsize ymark moveto xsize ymark 0.1 ft add 0.1 ft -90 90 arc stroke"
 		@Graphic leftarrow
 	    }
@@ -810,6 +829,11 @@ def @Math
 		@Graphic rightarrow
 	    }
 
+	    SVG        @Yield {
+		"0 ymark moveto 0 0.1 ft ymark add 0.1 ft -90 90 arcn stroke"
+		@Graphic rightarrow
+	    }
+
 	    PDF @Yield {
 #
 # VT: draws a clockwise 180 degree arc from -90 to +90 degree positions
@@ -837,6 +861,12 @@ def @Math
 	@HContract @VContract
 	  @BackEnd @Case {
 	    PostScript @Yield {
+		{
+		"grestore newpath 0 0 moveto xsize 0 lineto xsize ysize lineto"
+		"0 ysize lineto closepath clip gsave"
+		} @Graphic x
+	    }
+	    SVG        @Yield {
 		{
 		"grestore newpath 0 0 moveto xsize 0 lineto xsize ysize lineto"
 		"0 ysize lineto closepath clip gsave"
@@ -1000,6 +1030,11 @@ def @Math
 		"xsize ysize lineto 0.04 ft setlinewidth stroke"
 	      } @Graphic { 0.5f @Wide 2f @High ^/ 2f @High }
 	    }
+	    SVG        @Yield {
+	      { "xsize 0 moveto 0 ysize 2 div lineto"
+		"xsize ysize lineto 0.04 ft setlinewidth stroke"
+	      } @Graphic { 0.5f @Wide 2f @High ^/ 2f @High }
+	    }
 	    PDF @Yield {
 	      { "__mul(__loutf, 0.04) w __xsize 0 m"
 		"0 __div(__ysize, 2) l __xsize __ysize l S"
@@ -1012,6 +1047,11 @@ def @Math
     {
         @HContract @VContract @BackEnd @Case {
 	    PostScript @Yield {
+	      { "0 0 moveto xsize ysize 2 div lineto"
+		"0 ysize lineto 0.04 ft setlinewidth stroke"
+	      } @Graphic { 0.5f @Wide 2f @High ^/ 2f @High }
+	    }
+	    SVG        @Yield {
 	      { "0 0 moveto xsize ysize 2 div lineto"
 		"0 ysize lineto 0.04 ft setlinewidth stroke"
 	      } @Graphic { 0.5f @Wide 2f @High ^/ 2f @High }
@@ -1061,6 +1101,13 @@ def @Math
 	    "0.04 ft setlinewidth stroke"
 	  } @Graphic { 0.7f @Wide 0.3f @High ^/ 0.3f @High }
 	}
+	SVG        @Yield {
+	  {
+	    "xsize ysize 2 div moveto"
+	    "xsize 2 div ysize 2 div xsize 2 div 0 360 arc"
+	    "0.04 ft setlinewidth stroke"
+	  } @Graphic { 0.7f @Wide 0.3f @High ^/ 0.3f @High }
+	}
 	PDF @Yield {
 	  #
 	  # VT: draws a counterclockwise 360 degree arc from 0 to +360
@@ -1096,6 +1143,13 @@ def @Math
     def filledcircle
     { @HContract @VContract @BackEnd @Case {
 	PostScript @Yield {
+	  {
+	    "xsize ysize 2 div moveto"
+	    "xsize 2 div ysize 2 div xsize 2 div 0 360 arc"
+	    "0.04 ft setlinewidth fill"
+	  } @Graphic { 0.7f @Wide 0.3f @High ^/ 0.3f @High }
+	}
+	SVG        @Yield {
 	  {
 	    "xsize ysize 2 div moveto"
 	    "xsize 2 div ysize 2 div xsize 2 div 0 360 arc"
@@ -1145,6 +1199,13 @@ def @Math
 	    "0.04 ft setlinewidth stroke"
 	  } @Graphic { 0.6f @Wide 0.3f @High ^/ 0.3f @High }
 	}
+	SVG        @Yield {
+	  {
+	    "0 0 moveto xsize 0 lineto xsize ysize lineto"
+	    "0 ysize lineto closepath"
+	    "0.04 ft setlinewidth stroke"
+	  } @Graphic { 0.6f @Wide 0.3f @High ^/ 0.3f @High }
+	}
 	PDF @Yield {
 	  {
 	    "__mul(__loutf, 0.04) w"
@@ -1158,6 +1219,13 @@ def @Math
     def triangle
     { @HContract @VContract @BackEnd @Case {
 	PostScript @Yield {
+	  {
+	    "0 0 moveto xsize 0 lineto"
+	    "xsize 2 div ysize lineto closepath"
+	    "0.04 ft setlinewidth stroke"
+	  } @Graphic { 0.3f @Wide 0.3f @High ^| ^/ 0.3f @Wide 0.3f @High }
+	}
+	SVG        @Yield {
 	  {
 	    "0 0 moveto xsize 0 lineto"
 	    "xsize 2 div ysize lineto closepath"
@@ -1659,6 +1727,16 @@ def @Math
 		    }
 		}
 	  }
+	  SVG        @Yield {
+	    @HContract @VContract
+		{
+		    @VScale surd | @OneRow
+		    {
+			@HLine line { "0.03 ft setlinewidth 2 setlinecap" }
+			^//gap  |gap  @SquareRootStyle @Strut x # //gap
+		    }
+		}
+	  }
 	  PDF @Yield {
 		@HContract @VContract
 		{
@@ -2057,6 +2135,12 @@ def @Math
 	      }
 	      @Graphic { 0.3f @Wide 0.3f @High ^| ^/ 0.3f @Wide 0.3f @High }
 	    }
+	    SVG        @Yield {
+	      {	"0 0 moveto 0 ysize lineto xsize ysize lineto"
+		  "xsize 0 lineto 0.04 ft setlinewidth stroke"
+	      }
+	      @Graphic { 0.3f @Wide 0.3f @High ^| ^/ 0.3f @Wide 0.3f @High }
+	    }
 	    PDF @Yield {
 	      {	"__mul(__loutf, 0.04) w"
 		  "0 0 m 0 __ysize l __xsize __ysize l __xsize 0 l s"
@@ -2369,6 +2453,13 @@ def @Math
 		@Graphic { 0.5f @Wide 0.25f @High ^/ 0.25f @High }
 		/0.1f minus
 	    }
+	    SVG        @Yield {
+	        { "xsize 0 moveto 0 0 lineto 0 ysize lineto"
+		  "xsize ysize lineto 0.04 ft setlinewidth stroke"
+		}
+		@Graphic { 0.5f @Wide 0.25f @High ^/ 0.25f @High }
+		/0.1f minus
+	    }
 	    PDF @Yield {
 		{ "__mul(__loutf, 0.04) w __xsize 0 m 0 0 l"
 		  "0 __ysize l __xsize __ysize l s"
@@ -2498,6 +2589,12 @@ def @Math
     {
         @HContract @VContract @BackEnd @Case {
 	    PostScript @Yield {
+	     	{ "0 0 moveto xsize 0 lineto xsize ysize lineto"
+		   "0 ysize lineto 0.04 ft setlinewidth stroke"
+	        } @Graphic { 0.5f @Wide 0.25f @High ^/ 0.25f @High }
+	        /0.1f minus
+	    }
+	    SVG        @Yield {
 	     	{ "0 0 moveto xsize 0 lineto xsize ysize lineto"
 		   "0 ysize lineto 0.04 ft setlinewidth stroke"
 	        } @Graphic { 0.5f @Wide 0.25f @High ^/ 0.25f @High }

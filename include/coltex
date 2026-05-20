@@ -74,6 +74,7 @@ def @ColourCommand right @Body
     {
 	@BackEnd @Case {
 	    PostScript @Yield { coords "LoutSetRGBColor" }
+	    SVG        @Yield { coords "LoutSetRGBColor" }
 	    PDF        @Yield { coords "rg" coords "RG" }
 	    PlainText  @Yield ""
 	}
@@ -83,6 +84,7 @@ def @ColourCommand right @Body
     {
 	@BackEnd @Case {
 	    PostScript @Yield { coords "LoutSetCMYKColor" }
+	    SVG        @Yield { coords "LoutSetCMYKColor" }
 	    PDF        @Yield { coords "k" coords "K" }
 	    PlainText  @Yield ""
 	}

@@ -58,6 +58,16 @@ def @GraphZZZ
 	}
     }
     # VT: PDF does nothing
+    SVG        @Yield {
+	@Null &  # kills previous white space
+	@HContract @VContract {
+	  //0io ||0io @HContract @VContract 
+	  { p "trpoint translate" adj "translate gsave" // "grestore" }
+	  @Graphic { //margin ||margin x ||margin //margin }
+	  ||0io //0io
+	}
+    }
+    # VT: PDF does nothing
     PDF @Yield {
 	@Null &  # kills previous white space
 	@HContract @VContract {
@@ -218,6 +228,18 @@ def @GraphSetup
 	        symbolsize @Wide ^/ symbolsize @High}
 	}
 
+	SVG        @Yield {
+	    @HContract @VContract
+	    {
+	       # "newpath 0 0 moveto xsize ysize lineto 0 ysize moveto"
+	       # "xsize 0 lineto [] 0 setdash stroke"
+	       "lgraphdict begin xmark ymark xmark" symbollinewidth "docross"
+	       // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
 	PDF @Yield {
 	    @HContract @VContract
 	    { "n [] 0 d 0 0 m __xsize __ysize l 0 __ysize m __xsize 0 l S"}
@@ -236,6 +258,18 @@ def @GraphSetup
       @BackEnd @Case {
 
 	PostScript @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath xmark 0 moveto xmark ysize lineto 0 ymark moveto"
+	      # "xsize ymark lineto [] 0 setdash stroke"
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "doplus"
+	      // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
+	SVG        @Yield {
 	    @HContract @VContract
 	    {
 	      # "newpath xmark 0 moveto xmark ysize lineto 0 ymark moveto"
@@ -276,6 +310,18 @@ def @GraphSetup
 	        symbolsize @Wide ^/ symbolsize @High}
 	}
 
+	SVG        @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath 0 0 moveto xsize 0 lineto xsize ysize lineto"
+	      # "0 ysize lineto closepath [] 0 setdash stroke"
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "dosquare"
+	      // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
 	PDF @Yield {
 	    @HContract @VContract
 	    {"n [] 0 d 0 0 __xsize __ysize re s"}
@@ -304,6 +350,18 @@ def @GraphSetup
 	        symbolsize @Wide ^/ symbolsize @High}
 	}
 
+	SVG        @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath 0 0 moveto xsize 0 lineto xsize ysize lineto 0 ysize"
+	      # "lineto closepath gsave [] 0 setdash stroke grestore fill"
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilledsquare" // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
 	PDF @Yield {
 	    @HContract @VContract
 	    {"n [] 0 d 0 0 __xsize __ysize re b"}
@@ -321,6 +379,18 @@ def @GraphSetup
       @BackEnd @Case {
 
 	PostScript @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath 0 ymark moveto xmark 0 lineto xsize ymark lineto"
+	      # "xmark ysize lineto closepath [] 0 setdash stroke"
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "dodiamond"
+	      // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
+	SVG        @Yield {
 	    @HContract @VContract
 	    {
 	      # "newpath 0 ymark moveto xmark 0 lineto xsize ymark lineto"
@@ -361,6 +431,19 @@ def @GraphSetup
 	        symbolsize @Wide ^/ symbolsize @High}
 	}
 
+	SVG        @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath 0 ymark moveto xmark 0 lineto xsize ymark lineto"
+	      # "xmark ysize lineto closepath gsave [] 0 setdash stroke
+	      # grestore fill"
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilleddiamond" // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
 	PDF @Yield {
 	    @HContract @VContract
 	    {"n [] 0 d 0 __ymark m __xmark 0 l __xsize __ymark l __xmark __ysize l b"
@@ -379,6 +462,18 @@ def @GraphSetup
       @BackEnd @Case {
 
 	PostScript @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath xmark ymark xmark 0 360 arc"
+	      # "[] 0 setdash stroke"
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "docircle"
+	      // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
+	SVG        @Yield {
 	    @HContract @VContract
 	    {
 	      # "newpath xmark ymark xmark 0 360 arc"
@@ -432,6 +527,18 @@ def @GraphSetup
     {
       @BackEnd @Case {
 	PostScript @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath xmark ymark xmark 0 360 arc"
+	      # "gsave [] 0 setdash stroke grestore fill"
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilledcircle" // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
+	SVG        @Yield {
 	    @HContract @VContract
 	    {
 	      # "newpath xmark ymark xmark 0 360 arc"
@@ -501,6 +608,18 @@ def @GraphSetup
 	        symbolsize @Wide ^/ symbolsize @High}
 	}
 
+	SVG        @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath 0 0 moveto xsize 0 lineto xmark ysize 1.25 mul lineto"
+	      # "closepath [] 0 setdash stroke"
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "dotriangle"
+	      // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
 	PDF @Yield {
 	    @HContract @VContract
 	    {"n [] 0 d 0 0 m __xsize 0 l __xmark __mul(__ysize, 1.25) l s"}
@@ -518,6 +637,18 @@ def @GraphSetup
       @BackEnd @Case {
 
 	PostScript @Yield {
+	    @HContract @VContract
+	    {
+	      # "newpath 0 0 moveto xsize 0 lineto xmark ysize 1.25 mul lineto"
+	      # "closepath gsave [] 0 setdash stroke grestore fill"
+	     "lgraphdict begin xmark ymark xmark"
+	     symbollinewidth "dofilledtriangle" // "end"
+	    }
+	    @Graphic {symbolsize @High symbolsize @Wide ^|
+	        symbolsize @Wide ^/ symbolsize @High}
+	}
+
+	SVG        @Yield {
 	    @HContract @VContract
 	    {
 	      # "newpath 0 0 moveto xsize 0 lineto xmark ysize 1.25 mul lineto"
@@ -560,6 +691,13 @@ def @GraphSetup
 	    } @Graphic { length @Wide }
 	}
         # VT: PDF does nothing
+	SVG        @Yield {
+	    @HContract @VContract
+	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
+	       "/linewidth" linewidth "def xsize" dashlength "solid end"
+	    } @Graphic { length @Wide }
+	}
+        # VT: PDF does nothing
 	PDF @Yield {
 	    @HContract @VContract
 	  { "% @GraphSolid UNIMPLEMENTED" } @Graphic { length @Wide }
@@ -574,6 +712,13 @@ def @GraphSetup
     {
       @BackEnd @Case {
 	PostScript @Yield {
+	    @HContract @VContract
+	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
+	       "/linewidth" linewidth "def xsize" dashlength "dashed end"
+	    } @Graphic { length @Wide }
+	}
+        # VT: PDF does nothing
+	SVG        @Yield {
 	    @HContract @VContract
 	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
 	       "/linewidth" linewidth "def xsize" dashlength "dashed end"
@@ -600,6 +745,13 @@ def @GraphSetup
 	    } @Graphic { length @Wide }
 	}
         # VT: PDF does nothing
+	SVG        @Yield {
+	    @HContract @VContract
+	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
+	       "/linewidth" linewidth "def xsize" dashlength "dotted end"
+	    } @Graphic { length @Wide }
+	}
+        # VT: PDF does nothing
 	PDF @Yield {
 	    @HContract @VContract
 	  { "% @GraphDotted UNIMPLEMENTED" } @Graphic { olength @Wide }
@@ -614,6 +766,13 @@ def @GraphSetup
     {
       @BackEnd @Case {
 	PostScript @Yield {
+	    @HContract @VContract
+	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
+	       "/linewidth" linewidth "def xsize" dashlength "dotdashed end"
+	    } @Graphic { length @Wide }
+	}
+        # VT: PDF does nothing
+	SVG        @Yield {
 	    @HContract @VContract
 	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
 	       "/linewidth" linewidth "def xsize" dashlength "dotdashed end"
@@ -640,6 +799,13 @@ def @GraphSetup
 	    } @Graphic { length @Wide }
 	}
         # VT: PDF does nothing
+	SVG        @Yield {
+	    @HContract @VContract
+	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto"
+	       "/linewidth" linewidth "def xsize" dashlength "dotdotdashed end"
+	    } @Graphic { length @Wide }
+	}
+        # VT: PDF does nothing
 	PDF @Yield {
 	    @HContract @VContract
 	  { "% @GraphDotDotDashed UNIMPLEMENTED" } @Graphic { length @Wide }
@@ -654,6 +820,13 @@ def @GraphSetup
     {
       @BackEnd @Case {
 	PostScript @Yield {
+	    @HContract @VContract
+	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto /linewidth"
+	       linewidth "def xsize" dashlength "dotdotdotdashed end"
+	    } @Graphic { length @Wide }
+	}
+        # VT: PDF does nothing
+	SVG        @Yield {
 	    @HContract @VContract
 	    { "xsize 0 lgraphdict begin newpath 0 0 moveto lineto /linewidth"
 	       linewidth "def xsize" dashlength "dotdotdotdashed end"
@@ -1066,6 +1239,31 @@ def @GraphSetup
 	font @Font @AddCaptions width @Wide height @High
 	@BackEnd @Case {
 	    PostScript @Yield {
+		{
+		    "grestore"
+		    save @Case { { Yes yes } @Yield "save" else @Yield {} }
+		    "gsave xsize ysize lgraphdict begin /ysize exch def"
+		    "/xsize exch def /alldata [" @Body "] def"
+		    xticksep "[" xticks "] 0 alldata" xmin xmax xlog
+		      @XExtra @XDecreasing xorigin xticklength "xset"
+		    yticksep "[" yticks "] 1 alldata" ymin ymax ylog
+		      @YExtra @YDecreasing yorigin yticklength "yset"
+
+		    rticks @Case {
+
+		      ""   @Yield "norset"
+
+		      else @Yield {
+			rticksep "[" rticks "] 1 alldata" ymin ymax ylog
+			@YExtra @YDecreasing yorigin rticklength "rset"
+		      }
+		    }
+
+		    "rundata" @Style // "end"
+		    save @Case { { Yes yes } @Yield "restore" else @Yield {} }
+		} @Graphic { //1rt objects }
+	    }
+	    SVG        @Yield {
 		{
 		    "grestore"
 		    save @Case { { Yes yes } @Yield "save" else @Yield {} }

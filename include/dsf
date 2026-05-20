@@ -607,6 +607,7 @@ def @DocumentSetup
 	@BackEnd @Case {
 	   PlainText @Yield { "-" @PlainGraphic 1f @High }
 	   PostScript @Yield { {0 0 moveto xsize 0 lineto stroke} @Graphic {} }
+	   SVG @Yield { {0 0 moveto xsize 0 lineto stroke} @Graphic {} }
 	   PDF @Yield { {0 0 m __xsize 0 l S} @Graphic {} }
 	}
     }
@@ -889,6 +890,7 @@ def @DocumentSetup
 #     "LoutPageSet" @Graphic	# VT: case PDF produces nothing
       { @BackEnd @Case {
           PostScript @Yield "LoutPageSet"
+          SVG        @Yield "LoutPageSet"
           else @Yield "% @DoBackground/LoutPageSet UNIMPLEMENTED"
         }
       } @Graphic x
@@ -908,6 +910,7 @@ def @DocumentSetup
 #	{ parity "LoutMargSet" } @Graphic x	# VT: case PDF produces nothing
 	{ @BackEnd @Case {
 	    PostScript @Yield { parity "LoutMargSet" }
+	    SVG        @Yield { parity "LoutMargSet" }
 	    else @Yield "% @MargSet/LoutMargSet UNIMPLEMENTED"
 	  }
 	} @Graphic x
@@ -2781,6 +2784,13 @@ def @DocumentSetup
 		|@MarginNoteHGap //@MarginNoteVGap
 	    }
 	    }
+	    SVG @Yield {
+	    { parity "LoutMargShift gsave" // "grestore" } @Graphic
+	    {
+		|@MarginNoteHGap @MarginNoteWidth @Wide @OneRow x
+		|@MarginNoteHGap //@MarginNoteVGap
+	    }
+	    }
 	    PDF @Yield { "% @MargPut/LoutMargShift UNIMPLEMENTED" @Graphic {
 		  |@MarginNoteHGap @MarginNoteWidth @Wide @OneRow x
 		  |@MarginNoteHGap //@MarginNoteVGap
@@ -2854,6 +2864,10 @@ def @DocumentSetup
 	  @BackEnd @Case {
 	    PlainText @Yield ""
 	    PostScript @Yield {
+		{ "LoutPageDict begin matr setmatrix" x y "translate end gsave"
+		  // "grestore" } @Graphic val
+	    }
+	    SVG        @Yield {
 		{ "LoutPageDict begin matr setmatrix" x y "translate end gsave"
 		  // "grestore" } @Graphic val
 	    }
