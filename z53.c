@@ -4464,49 +4464,141 @@ BACK_END SVG_BackEnd = &svg_back;
 /*                                                                           */
 /*  SVG_NullBackEnd                                                          */
 /*                                                                           */
+/*  A null (non-printing) version of the SVG back end, mirroring the layout */
+/*  of PS_NullBackEnd in z49.c.  Used by z01.c for non-final cross-reference */
+/*  resolution passes, where the engine traverses the formatted tree but no */
+/*  output should be emitted.  Every callback here is a true no-op; we do   */
+/*  NOT reuse the real SVG_* callbacks (some of which perform expensive     */
+/*  per-page work like ingesting @SysPrependGraphic files into the PS       */
+/*  interpreter, or maintain CTM/dictionary state that is irrelevant when   */
+/*  no SVG is being emitted).                                                */
+/*                                                                           */
 /*****************************************************************************/
 
 static void SVG_NullPrintInitialize(FILE *fp, BOOLEAN enc)
 {}
 
+static void SVG_NullPrintPageSetupForFont(OBJECT face, int font_curr_page,
+  FULL_CHAR *font_name, FULL_CHAR *short_name)
+{}
+
+static void SVG_NullPrintPageResourceForFont(FULL_CHAR *font_name,
+  BOOLEAN first)
+{}
+
+static void SVG_NullPrintMapping(MAPPING m)
+{}
+
+static void SVG_NullPrintBeforeFirstPage(FULL_LENGTH h, FULL_LENGTH v,
+  FULL_CHAR *label)
+{}
+
+static void SVG_NullPrintBetweenPages(FULL_LENGTH h, FULL_LENGTH v,
+  FULL_CHAR *label)
+{}
+
+static void SVG_NullPrintAfterLastPage(void)
+{}
+
+static void SVG_NullPrintWord(OBJECT x, int hpos, int vpos)
+{}
+
+static void SVG_NullPrintPlainGraphic(OBJECT x, FULL_LENGTH xmk,
+  FULL_LENGTH ymk, OBJECT z)
+{}
+
+static void SVG_NullPrintUnderline(FONT_NUM fnum, COLOUR_NUM col,
+  TEXTURE_NUM pat, FULL_LENGTH xstart, FULL_LENGTH xstop, FULL_LENGTH ymk)
+{}
+
+static void SVG_NullCoordTranslate(FULL_LENGTH xdist, FULL_LENGTH ydist)
+{}
+
+static void SVG_NullCoordRotate(FULL_LENGTH amount)
+{}
+
+static void SVG_NullCoordScale(float hfactor, float vfactor)
+{}
+
+static void SVG_NullCoordHMirror(void)
+{}
+
+static void SVG_NullCoordVMirror(void)
+{}
+
+static void SVG_NullSaveGraphicState(OBJECT x)
+{}
+
+static void SVG_NullRestoreGraphicState(void)
+{}
+
+static void SVG_NullPrintGraphicObject(OBJECT x)
+{}
+
+static void SVG_NullDefineGraphicNames(OBJECT x)
+{}
+
+static void SVG_NullSaveTranslateDefineSave(OBJECT x, FULL_LENGTH xdist,
+  FULL_LENGTH ydist)
+{}
+
+static void SVG_NullPrintGraphicInclude(OBJECT x, FULL_LENGTH colmark,
+  FULL_LENGTH rowmark)
+{}
+
+static void SVG_NullLinkSource(OBJECT name, FULL_LENGTH llx, FULL_LENGTH lly,
+  FULL_LENGTH urx, FULL_LENGTH ury)
+{}
+
+static void SVG_NullLinkDest(OBJECT name, FULL_LENGTH llx, FULL_LENGTH lly,
+  FULL_LENGTH urx, FULL_LENGTH ury)
+{}
+
+static void SVG_NullLinkURL(OBJECT url, FULL_LENGTH llx, FULL_LENGTH lly,
+  FULL_LENGTH urx, FULL_LENGTH ury)
+{}
+
+static void SVG_NullLinkCheck(void)
+{}
+
 static struct back_end_rec svg_null_back = {
-  SVG,
-  STR_SVG,
-  TRUE,
-  TRUE,
-  TRUE,
-  TRUE,
-  TRUE,
-  FALSE,
-  TRUE,
-  TRUE,
-  TRUE,
+  SVG,                                  /* the code number of the back end   */
+  STR_SVG,                              /* string name of the back end       */
+  TRUE,                                 /* TRUE if @Scale is available       */
+  TRUE,                                 /* TRUE if @Rotate is available      */
+  TRUE,                                 /* TRUE if @HMirror, @VMirror avail  */
+  TRUE,                                 /* TRUE if @Graphic is available     */
+  TRUE,                                 /* TRUE if @IncludeGraphic is avail. */
+  FALSE,                                /* TRUE if @PlainGraphic is avail.   */
+  TRUE,                                 /* TRUE if fractional spacing avail. */
+  TRUE,                                 /* TRUE if actual font metrics used  */
+  TRUE,                                 /* TRUE if colour is available       */
   SVG_NullPrintInitialize,
   SVG_PrintLength,
-  SVG_PrintPageSetupForFont,
-  SVG_PrintPageResourceForFont,
-  SVG_PrintMapping,
-  SVG_PrintBeforeFirstPage,
-  SVG_PrintBetweenPages,
-  SVG_PrintAfterLastPage,
-  SVG_PrintWord,
-  SVG_PrintPlainGraphic,
-  SVG_PrintUnderline,
-  SVG_CoordTranslate,
-  SVG_CoordRotate,
-  SVG_CoordScale,
-  SVG_CoordHMirror,
-  SVG_CoordVMirror,
-  SVG_SaveGraphicState,
-  SVG_RestoreGraphicState,
-  SVG_PrintGraphicObject,
-  SVG_DefineGraphicNames,
-  SVG_SaveTranslateDefineSave,
-  SVG_PrintGraphicInclude,
-  SVG_LinkSource,
-  SVG_LinkDest,
-  SVG_LinkURL,
-  SVG_LinkCheck,
+  SVG_NullPrintPageSetupForFont,
+  SVG_NullPrintPageResourceForFont,
+  SVG_NullPrintMapping,
+  SVG_NullPrintBeforeFirstPage,
+  SVG_NullPrintBetweenPages,
+  SVG_NullPrintAfterLastPage,
+  SVG_NullPrintWord,
+  SVG_NullPrintPlainGraphic,
+  SVG_NullPrintUnderline,
+  SVG_NullCoordTranslate,
+  SVG_NullCoordRotate,
+  SVG_NullCoordScale,
+  SVG_NullCoordHMirror,
+  SVG_NullCoordVMirror,
+  SVG_NullSaveGraphicState,
+  SVG_NullRestoreGraphicState,
+  SVG_NullPrintGraphicObject,
+  SVG_NullDefineGraphicNames,
+  SVG_NullSaveTranslateDefineSave,
+  SVG_NullPrintGraphicInclude,
+  SVG_NullLinkSource,
+  SVG_NullLinkDest,
+  SVG_NullLinkURL,
+  SVG_NullLinkCheck,
 };
 
 BACK_END SVG_NullBackEnd = &svg_null_back;
