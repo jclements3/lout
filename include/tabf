@@ -291,7 +291,10 @@ def @Tab
     def @HSingle	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhs   }
-	  SVG        @Yield { linewidth ltabhs   }
+	  SVG        @Yield {
+	    # SVG override: inline horizontal single rule, skip ltabhs dict call.
+	    "0 0 moveto xsize 0 lineto" linewidth "setlinewidth 0 setlinecap stroke"
+	  }
 	  PDF        @Yield { "0 0 m __xsize 0 l" linewidth "w 0 J S" }
     	}
     }
@@ -299,7 +302,10 @@ def @Tab
     def @HSingleProject	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhsp  }
-	  SVG        @Yield { linewidth ltabhsp  }
+	  SVG        @Yield {
+	    # SVG override: inline projecting-end horizontal rule.
+	    "0 0 moveto xsize 0 lineto" linewidth "setlinewidth 2 setlinecap stroke"
+	  }
 	  PDF        @Yield { "0 0 m __xsize 0 l" linewidth "w 2 J S" }
     	}
     }
@@ -307,7 +313,12 @@ def @Tab
     def @HDouble	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhd   }
-	  SVG        @Yield { linewidth ltabhd   }
+	  SVG        @Yield {
+	    # SVG override: inline horizontal double rule (mark + offset 3*lw above).
+	    "0 0 moveto xsize 0 lineto"
+	    "0" linewidth "3 mul moveto xsize" linewidth "3 mul lineto"
+	    linewidth "setlinewidth 0 setlinecap stroke"
+	  }
 	  PDF        @Yield {		#   dup dup
 	  	"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 	  	"0 __mul(3, " linewidth ") m __xsize __mul(3, " linewidth ") l"	#  0 exch 3 mul moveto xsize exch 3 mul lineto
@@ -319,7 +330,12 @@ def @Tab
     def @HDoubleBelow	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdb  }
-	  SVG        @Yield { linewidth ltabhdb  }
+	  SVG        @Yield {
+	    # SVG override: inline horizontal double rule (mark + offset 3*lw below).
+	    "0 0 moveto xsize 0 lineto"
+	    "0" linewidth "-3 mul moveto xsize" linewidth "-3 mul lineto"
+	    linewidth "setlinewidth 0 setlinecap stroke"
+	  }
 	  PDF        @Yield {		#   dup dup
 		"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 		"0 __mul(-3, "linewidth") m __xsize __mul(-3, "linewidth") l"	#  0 exch -3 mul moveto xsize exch -3 mul lineto
@@ -331,7 +347,14 @@ def @Tab
     def @HDoubleNW	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdnw  }
-	  SVG        @Yield { linewidth ltabhdnw  }
+	  SVG        @Yield {
+	    # SVG override: horizontal double with northwest corner.
+	    "0 0 moveto xsize 0 lineto"
+	    "xsize" linewidth "3 mul moveto"
+	    linewidth "-3 mul" linewidth "3 mul lineto"
+	    linewidth "-3 mul 0 lineto"
+	    linewidth "setlinewidth 0 setlinejoin 2 setlinecap stroke"
+	  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 		"__xsize __mul(3, "linewidth") m"	#	xsize exch 3 mul moveto
@@ -345,7 +368,14 @@ def @Tab
     def @HDoubleNE	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdne  }
-	  SVG        @Yield { linewidth ltabhdne  }
+	  SVG        @Yield {
+	    # SVG override: horizontal double with northeast corner.
+	    "0 0 moveto xsize 0 lineto"
+	    "0" linewidth "3 mul moveto"
+	    linewidth "3 mul xsize add" linewidth "3 mul lineto"
+	    linewidth "3 mul xsize add 0 lineto"
+	    linewidth "setlinewidth 0 setlinejoin 2 setlinecap stroke"
+	  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#   0 0 moveto xsize 0 lineto
 		"0 __mul(3, "linewidth") m"	#	0 exch 3 mul moveto
@@ -359,7 +389,14 @@ def @Tab
     def @HDoubleSW	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdsw  }
-	  SVG        @Yield { linewidth ltabhdsw  }
+	  SVG        @Yield {
+	    # SVG override: horizontal double with southwest corner.
+	    "0 0 moveto xsize 0 lineto"
+	    "xsize" linewidth "-3 mul moveto"
+	    linewidth "-3 mul" linewidth "-3 mul lineto"
+	    linewidth "-3 mul 0 lineto"
+	    linewidth "setlinewidth 0 setlinejoin 2 setlinecap stroke"
+	  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#	0 0 moveto xsize 0 lineto
 		"__xsize __mul(-3, "linewidth") m"	#	xsize exch -3 mul moveto
@@ -373,7 +410,14 @@ def @Tab
     def @HDoubleSE	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabhdse  }
-	  SVG        @Yield { linewidth ltabhdse  }
+	  SVG        @Yield {
+	    # SVG override: horizontal double with southeast corner.
+	    "0 0 moveto xsize 0 lineto"
+	    "0" linewidth "-3 mul moveto"
+	    linewidth "3 mul xsize add" linewidth "-3 mul lineto"
+	    linewidth "3 mul xsize add 0 lineto"
+	    linewidth "setlinewidth 0 setlinejoin 2 setlinecap stroke"
+	  }
 	  PDF        @Yield {		#   dup dup dup dup
 		"0 0 m __xsize 0 l"	#	0 0 moveto xsize 0 lineto
 		"0 __mul(-3, "linewidth") m"	#	0 exch -3 mul moveto
@@ -387,7 +431,10 @@ def @Tab
     def @VSingle	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabvs  }
-	  SVG        @Yield { linewidth ltabvs  }
+	  SVG        @Yield {
+	    # SVG override: inline vertical single rule.
+	    "0 0 moveto 0 ysize lineto" linewidth "setlinewidth 0 setlinecap stroke"
+	  }
 	  PDF        @Yield {
 		"0 0 m 0 __ysize l"	#	0 0 moveto 0 ysize lineto
 		linewidth "w 0 J S"	#	setlinewidth 0 setlinecap stroke
@@ -398,7 +445,13 @@ def @Tab
     def @VDouble	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabvd  }
-	  SVG        @Yield { linewidth ltabvd  }
+	  SVG        @Yield {
+	    # SVG override: inline vertical double rule (mark + offset 3*lw left).
+	    "0 0 moveto 0 ysize lineto"
+	    linewidth "-3 mul 0 moveto"
+	    linewidth "-3 mul ysize lineto"
+	    linewidth "setlinewidth 0 setlinecap stroke"
+	  }
 	  PDF        @Yield {	#	dup dup
 		"0 0 m 0 __ysize l"	#	0 0 moveto 0 ysize lineto
 		"__mul(-3, "linewidth") 0 m __mul(-3, "linewidth") __ysize l"	#	-3 mul 0 moveto -3 mul ysize lineto
@@ -410,7 +463,13 @@ def @Tab
     def @VDoubleRight	{
 	@BackEnd @Case {
 	  PostScript @Yield { linewidth ltabvdr  }
-	  SVG        @Yield { linewidth ltabvdr  }
+	  SVG        @Yield {
+	    # SVG override: inline vertical double rule (mark + offset 3*lw right).
+	    "0 0 moveto 0 ysize lineto"
+	    linewidth "3 mul 0 moveto"
+	    linewidth "3 mul ysize lineto"
+	    linewidth "setlinewidth 0 setlinecap stroke"
+	  }
 	  PDF        @Yield {	#	dup dup
 		"0 0 m 0 __ysize l"	#	0 0 moveto 0 ysize lineto
 		"__mul(3, "linewidth") 0 m __mul(3, "linewidth") __ysize l"		#	3 mul 0 moveto 3 mul ysize lineto
