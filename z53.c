@@ -46,7 +46,8 @@
 #define SVG_PS_GS_DEPTH       32
 #define SVG_PS_DICT_STACK_DEPTH 32
 #define SVG_PS_DICT_POOL      1024
-#define SVG_PS_DICT_ENTRIES   256
+#define SVG_PS_DICT_ENTRIES   512   /* must be a power of 2: open-addressing */
+#define SVG_PS_DICT_MASK      (SVG_PS_DICT_ENTRIES - 1)
 #define SVG_PS_MAX_RECURSION  256
 #define SVG_PATH_BUF_SIZE     16384
 #define SVG_DASH_BUF_SIZE     128
@@ -1043,14 +1044,16 @@ typedef struct svg_alloc {
 } svg_alloc;
 
 typedef struct svg_dict_entry {
-  char     *name;               /* arena-owned */
-  svg_value value;
-  int       used;
+  char         *name;           /* arena-owned; NULL == empty slot         */
+  svg_value     value;
+  int           used;           /* 1 iff name != NULL (kept for clarity)   */
+  unsigned int  hash;           /* cached FNV-1a hash of name              */
 } svg_dict_entry;
 
 typedef struct svg_dict {
   svg_dict_entry entries[SVG_PS_DICT_ENTRIES];
   int            in_use;
+  int            count;         /* number of occupied slots                */
 } svg_dict;
 
 
@@ -1178,14 +1181,29 @@ static void svg_arena_free_all(void)
 /*  Dictionary helpers                                                     */
 /***************************************************************************/
 
+/* FNV-1a 32-bit hash over a NUL-terminated byte string.  Small, branchless,  */
+/* well-distributed on short ASCII PostScript names; ANSI C clean.            */
+static unsigned int svg_name_hash(const char *s)
+{
+  unsigned int h = 2166136261u;
+  while( *s )
+  {
+    h ^= (unsigned char) *s++;
+    h *= 16777619u;
+  }
+  return h;
+}
+
 static void svg_dict_clear(svg_dict *d)
 {
   int i;
   d->in_use = 1;
+  d->count = 0;
   for( i = 0; i < SVG_PS_DICT_ENTRIES; i++ )
   {
     d->entries[i].used = 0;
     d->entries[i].name = NULL;
+    d->entries[i].hash = 0;
   }
 }
 
@@ -1208,50 +1226,72 @@ static int svg_dict_alloc(void)
 struct svg_ps_state;
 static void svg_dict_try_free_anonymous(int did, struct svg_ps_state *s);
 
+/* Open-addressed insert / update.  Linear probing on FNV-1a(name).  Empty   */
+/* slot iff entries[slot].name == NULL.  No deletes ever happen at the      */
+/* entry level (the only way to drop entries is svg_dict_clear, which       */
+/* zeroes the whole table), so we do not need tombstones.                    */
 static void svg_dict_def(int did, const char *name, const svg_value *v)
 {
-  int i, slot, first_free;
+  unsigned int h, mask, slot;
+  int probes;
   svg_dict *d;
+  svg_dict_entry *e;
   if( did < 0 || did >= SVG_PS_DICT_POOL )
     return;
   d = &svg_dict_pool[did];
-  first_free = -1;
-  for( i = 0; i < SVG_PS_DICT_ENTRIES; i++ )
+  h = svg_name_hash(name);
+  mask = (unsigned int) SVG_PS_DICT_MASK;
+  slot = h & mask;
+  for( probes = 0; probes < SVG_PS_DICT_ENTRIES; probes++ )
   {
-    if( !d->entries[i].used )
+    e = &d->entries[slot];
+    if( e->name == NULL )
     {
-      if( first_free < 0 ) first_free = i;
-      continue;
-    }
-    if( d->entries[i].name != NULL && strcmp(d->entries[i].name, name) == 0 )
-    {
-      d->entries[i].value = *v;
+      /* empty -> insert */
+      e->used = 1;
+      e->hash = h;
+      e->name = svg_arena_strdup(name, (int) strlen(name));
+      e->value = *v;
+      d->count++;
       return;
     }
+    if( e->hash == h && strcmp(e->name, name) == 0 )
+    {
+      /* update existing */
+      e->value = *v;
+      return;
+    }
+    slot = (slot + 1) & mask;
   }
-  if( first_free < 0 )
-    return;
-  slot = first_free;
-  d->entries[slot].used = 1;
-  d->entries[slot].name = svg_arena_strdup(name, (int) strlen(name));
-  d->entries[slot].value = *v;
+  /* table full: silently drop the define (matches previous behaviour: a    */
+  /* completely full table also dropped the insert).                        */
 }
 
 static int svg_dict_lookup(int did, const char *name, svg_value *out)
 {
-  int i;
+  unsigned int h, mask, slot;
+  int probes;
   svg_dict *d;
+  svg_dict_entry *e;
   if( did < 0 || did >= SVG_PS_DICT_POOL )
     return 0;
   d = &svg_dict_pool[did];
-  for( i = 0; i < SVG_PS_DICT_ENTRIES; i++ )
+  if( d->count == 0 )
+    return 0;
+  h = svg_name_hash(name);
+  mask = (unsigned int) SVG_PS_DICT_MASK;
+  slot = h & mask;
+  for( probes = 0; probes < SVG_PS_DICT_ENTRIES; probes++ )
   {
-    if( d->entries[i].used && d->entries[i].name != NULL &&
-        strcmp(d->entries[i].name, name) == 0 )
+    e = &d->entries[slot];
+    if( e->name == NULL )
+      return 0;                                /* empty: not found        */
+    if( e->hash == h && strcmp(e->name, name) == 0 )
     {
-      *out = d->entries[i].value;
+      *out = e->value;
       return 1;
     }
+    slot = (slot + 1) & mask;
   }
   return 0;
 }
