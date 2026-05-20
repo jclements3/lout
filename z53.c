@@ -3594,8 +3594,17 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   {
     int eq = 0;
     vb = svg_ps_pop_value(s); va = svg_ps_pop_value(s);
-    if( (va.kind == SVG_VK_NUM || va.kind == SVG_VK_BOOL) &&
-        (vb.kind == SVG_VK_NUM || vb.kind == SVG_VK_BOOL) )
+    /* PostScript eq: numbers compare by value, booleans by value, but a   */
+    /* number and a boolean are never equal -- they're distinct types.    */
+    /* The graphf.lpg axesstyle dispatch `xaxis false eq yaxis false eq   */
+    /* or { framestyle } { ... } ifelse` relies on this: when `xaxis`     */
+    /* and `yaxis` are 0 (the common `xorigin { 0 }` case on user-guide   */
+    /* pp. 248, 262) they must not test equal to the boolean `false`, or  */
+    /* the dispatch wrongly selects framestyle and the axis lines + tick  */
+    /* labels are never drawn.                                            */
+    if( va.kind == SVG_VK_NUM && vb.kind == SVG_VK_NUM )
+      eq = (va.num == vb.num);
+    else if( va.kind == SVG_VK_BOOL && vb.kind == SVG_VK_BOOL )
       eq = (va.num == vb.num);
     else if( (va.kind == SVG_VK_NAME || va.kind == SVG_VK_LITNAME ||
               va.kind == SVG_VK_STRING) &&

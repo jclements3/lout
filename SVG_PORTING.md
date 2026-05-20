@@ -635,38 +635,32 @@ before the fix) and pool_used stays under 20 indefinitely.
   `/tmp/tex.lt` (the small per-texture box document used for spot
   checking).
 
-- **@Graph plot — symbol/curve alignment (user-guide pp 248, 262).**
-  The previous `symbolsize`-drift fix (the C-side shortcut at z53.c
-  ~3000 that intercepts `square`/`docircle`/etc. and draws the symbol
-  directly from dict-bound `xcurr`/`ycurr`/`symbolsize`/`symbollinewidth`)
-  removes the page-sized blob, but leaves the plotted symbols a few
-  device-pt away from the curve and the axis ticks slightly off.  The
-  C-side `trpoint` arithmetic at z53.c:3101-3110 mirrors graphf.lpg's
-  `trpoint`, but has two known minor divergences vs. the PS interpreter
-  drawing the curve and axes:
+- **@Graph axes missing on `style { axes }` graphs with `xorigin { 0 }` /
+  `yorigin { 0 }`** (user-guide pp 248, 262) -- **fixed 2026-05-20**.
 
-  1. `xdecr`/`ydecr` are looked up via `vv.kind == SVG_VK_NUM`, but
-     graphf.lpg's `xset` defines them via `/xdecr exch def` from a
-     boolean argument.  In our PS interpreter booleans are stored with
-     `kind == SVG_VK_BOOL`, so the lookup misses and the symbol code
-     always treats the axis as ascending.  Harmless for ascending
-     graphs; visible misalignment on descending axes.
-  2. `xtr`/`ytr` collapse `x <= 0` to `0` via `plog` when log scaling is
-     active.  The C shortcut leaves such points un-transformed instead.
-     Again harmless for the strictly-positive data in the user guide
-     examples.
+  Root cause was in the `eq` operator, not in any of the symbol-drawing
+  arithmetic that the previous round was hunting through.  graphf.lpg's
+  `axesstyle` dispatches on
+      `xaxis false eq yaxis false eq or { framestyle } { ... } ifelse`
+  to choose between drawing a full frame (when `xaxis` / `yaxis` was
+  literally `false`, meaning "no origin given") or drawing crossed
+  axes (when both have numeric values).  Our `eq` implementation
+  treated `SVG_VK_NUM` and `SVG_VK_BOOL` interchangeably -- both have
+  `vv.num` holding the value, with `false` represented as `0.0` -- so
+  `0 false eq` returned `true` and the dispatch always took the
+  framestyle branch.  Every `xorigin { 0 }` / `yorigin { 0 }` graph
+  (the common case) rendered as a frame with inward tick stubs and no
+  axis lines instead of the proper crossed axes with outward ticks.
 
-  Neither matches the reported "few pt of slop on ascending linear
-  axes" symptom, so the misalignment likely comes from a different
-  source -- candidates include (a) a stale `xextra`/`yextra` left over
-  from a prior @Graph in the same document, (b) the symbol path being
-  drawn into the graph's own gsave/grestore frame instead of the
-  enclosing axis frame (the PS interpreter walks both, the C shortcut
-  uses whatever frame is current when the symbol op fires), or (c) a
-  half-pt offset introduced by the C side treating `slw` as already
-  scaled when the PS proc's `do<shape>` form scales it again via the
-  enclosing CTM.  Investigation deferred; rebuilding the user guide
-  to verify takes ~15 min for the 3-pass cross-ref resolution, which
-  consumed the bulk of this session's time-box.  Note for next pass:
-  the boolean-vs-numeric `xdecr` lookup is a one-line patch worth
-  doing on principle even if it isn't the dominant offender.
+  Fix: `eq` / `ne` now require both operands to be the same kind
+  (NUM-vs-NUM or BOOL-vs-BOOL) before comparing `vv.num`.  Cross-type
+  comparisons fall through to the `kind == kind` fallback, which is
+  false for NUM vs BOOL.  String and name comparisons are unchanged.
+
+  After the fix the axesstyle dispatch correctly takes the axes
+  branch, emitting the two crossed lines `M 0 0 L xsize 0` and
+  `M 0 0 L 0 ysize`, and the tick procs draw their tick marks
+  centred on the axis (outward) rather than below the (absent) frame.
+  Tick numeric labels are still missing because `show` is still a
+  stub in @Graphic context; that is a separate text-emission issue.
+  All 30 regression snippets continue to pass.
