@@ -95,6 +95,7 @@ static BOOLEAN     cur_gr_set;
 /* later in this file but called from PrintInitialize/PrintAfterLastPage.   */
 static void svg_psinterp_init(void);
 static void svg_psinterp_shutdown(void);
+static void svg_emit_pattern_defs(void);
 
 static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
 {
@@ -156,6 +157,10 @@ static void svg_open_page(FULL_LENGTH h, FULL_LENGTH v, FULL_CHAR *label)
     "viewBox=\"0 0 %d %d\">\n",
     pagecount, label == NULL ? "" : (const char *) label,
     w_pt, h_pt, w_pt, h_pt);
+  /* Page-level <defs> with hard-coded SVG <pattern> definitions for every  */
+  /* named Lout texture; emitted up here (before the Y-flip group) so the   */
+  /* patternUnits="userSpaceOnUse" tile sizes are in non-flipped pt units.  */
+  svg_emit_pattern_defs();
   /* Single page-level Y-flip so paths/rules/transforms can use literal     */
   /* Lout (bottom-left) coordinates inside the page.                        */
   fprintf(out_fp, "<g transform=\"matrix(1 0 0 -1 0 %d)\">\n", h_pt);
@@ -966,7 +971,36 @@ typedef struct svg_gstate {
   /* restored by grestore (gs_top--), exactly mirroring PS clip-stack   */
   /* semantics.                                                          */
   int    clip_empty;
+  /* texture_kind: 0 = solid (default), otherwise an index into the     */
+  /* svg_tex_names[] table.  Set by LoutSetTexture when its argument    */
+  /* carries a recognised texture kind; consumed by svg_ps_emit_path   */
+  /* during fills to substitute fill="url(#lout-tex-NAME)" for the     */
+  /* plain colour.  Copied by gsave/restored by grestore via the       */
+  /* struct-copy/pop pair, exactly like fill_rgb.                       */
+  int    texture_kind;
 } svg_gstate;
+
+/* Named textures recognised by the proc-body scanner inside              */
+/* LoutMakeTexture.  Index 0 is the implicit "solid" (no pattern); the    */
+/* remaining entries are emitted into a <defs> block once at the top of   */
+/* every SVG page so any later fill that references "url(#lout-tex-XXX)"  */
+/* resolves correctly.                                                    */
+enum {
+  SVG_TEX_SOLID = 0,
+  SVG_TEX_STRIPED,
+  SVG_TEX_GRID,
+  SVG_TEX_DOTTED,
+  SVG_TEX_CHESSBOARD,
+  SVG_TEX_BRICKWORK,
+  SVG_TEX_HONEYCOMB,
+  SVG_TEX_TRIANGULAR,
+  SVG_TEX_STRING,
+  SVG_TEX_COUNT
+};
+static const char * const svg_tex_names[SVG_TEX_COUNT] = {
+  "solid", "striped", "grid", "dotted", "chessboard",
+  "brickwork", "honeycomb", "triangular", "string"
+};
 
 
 /***************************************************************************/
@@ -1377,6 +1411,187 @@ static void svg_dict_gc_sweep(struct svg_ps_state *s)
   }
 }
 
+/*****************************************************************************/
+/*                                                                           */
+/*  Texture-proc inspector.                                                  */
+/*                                                                           */
+/*  LoutMakeTexture in PostScript receives a paint-procedure body whose     */
+/*  contents distinguish the named textures defined in coltex.ld (striped,   */
+/*  grid, dotted, chessboard, brickwork, honeycomb, triangular, string).     */
+/*  The procedure is parsed into an svg_value of kind SVG_VK_PROC whose      */
+/*  items[] holds the token stream; we walk it (recursing into nested        */
+/*  procs/arrays) and tally distinctive operator names, then choose the      */
+/*  texture kind from those tallies.  The result is one of SVG_TEX_*; an     */
+/*  unrecognised proc falls back to SVG_TEX_SOLID and prints as flat fill.   */
+/*                                                                           */
+/*****************************************************************************/
+
+typedef struct svg_tex_scan {
+  int has_arc;          /* "arc" -> dotted                                   */
+  int has_setdash;      /* "setdash" -> brickwork/honeycomb/triangular       */
+  int has_stroke;       /* "stroke"                                          */
+  int has_findfont;     /* "findfont"/"show" -> string                       */
+  int has_show;
+  int has_closepath;
+  int has_fill;
+  int n_rlineto;        /* count of rlineto: honeycomb has many, brickwork few */
+  int n_lineto;
+  int n_moveto;
+} svg_tex_scan;
+
+static void svg_tex_scan_walk(const svg_value *items, int n, svg_tex_scan *t)
+{
+  int i;
+  if( items == NULL ) return;
+  for( i = 0; i < n; i++ )
+  {
+    const svg_value *v = &items[i];
+    if( (v->kind == SVG_VK_NAME || v->kind == SVG_VK_LITNAME) &&
+        v->name != NULL )
+    {
+      const char *nm = v->name;
+      if(      strcmp(nm, "arc") == 0 )            t->has_arc = 1;
+      else if( strcmp(nm, "setdash") == 0 )        t->has_setdash = 1;
+      else if( strcmp(nm, "stroke") == 0 )         t->has_stroke = 1;
+      else if( strcmp(nm, "findfont") == 0 )       t->has_findfont = 1;
+      else if( strcmp(nm, "show") == 0 )           t->has_show = 1;
+      else if( strcmp(nm, "closepath") == 0 )      t->has_closepath = 1;
+      else if( strcmp(nm, "fill") == 0 )           t->has_fill = 1;
+      else if( strcmp(nm, "rlineto") == 0 )        t->n_rlineto++;
+      else if( strcmp(nm, "lineto") == 0 )         t->n_lineto++;
+      else if( strcmp(nm, "moveto") == 0 )         t->n_moveto++;
+    }
+    if( (v->kind == SVG_VK_PROC || v->kind == SVG_VK_ARRAY) &&
+        v->items != NULL )
+    {
+      svg_tex_scan_walk(v->items, v->nitems, t);
+    }
+  }
+}
+
+static int svg_tex_identify(const svg_value *proc)
+{
+  svg_tex_scan t;
+  if( proc == NULL || proc->kind != SVG_VK_PROC || proc->items == NULL )
+    return SVG_TEX_SOLID;
+  t.has_arc = t.has_setdash = t.has_stroke = 0;
+  t.has_findfont = t.has_show = t.has_closepath = t.has_fill = 0;
+  t.n_rlineto = t.n_lineto = t.n_moveto = 0;
+  svg_tex_scan_walk(proc->items, proc->nitems, &t);
+
+  /* string: only one that uses findfont/show.                             */
+  if( t.has_findfont || t.has_show )            return SVG_TEX_STRING;
+  /* dotted: only one that uses arc.                                       */
+  if( t.has_arc )                               return SVG_TEX_DOTTED;
+  /* the three stroke-with-dash textures use setdash + stroke; tell them   */
+  /* apart by closepath count and the presence of plain lineto (absolute):*/
+  /*   brickwork  -> 0 closepath, no lineto, ~6 rlineto, ~5 moveto       */
+  /*   honeycomb  -> 1 closepath, no lineto, ~7 rlineto, 1 moveto        */
+  /*   triangular -> 1 closepath, >=2 lineto, ~2 rlineto                  */
+  if( t.has_setdash && t.has_stroke )
+  {
+    if( t.has_closepath && t.n_lineto >= 2 )    return SVG_TEX_TRIANGULAR;
+    if( t.has_closepath )                       return SVG_TEX_HONEYCOMB;
+    return SVG_TEX_BRICKWORK;
+  }
+  /* grid vs striped vs chessboard: all use closepath fill, no setdash.   */
+  /* chessboard has 2 moveto's; grid has 5 rlineto's; striped has 2.      */
+  if( t.has_closepath && t.has_fill )
+  {
+    if( t.n_moveto >= 2 )                       return SVG_TEX_CHESSBOARD;
+    if( t.n_rlineto >= 4 )                      return SVG_TEX_GRID;
+    return SVG_TEX_STRIPED;
+  }
+  return SVG_TEX_SOLID;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  svg_emit_pattern_defs - write a <defs> block containing every named     */
+/*  texture pattern, ready to be referenced from later fills via             */
+/*  fill="url(#lout-tex-NAME)".  Called once at the top of each <svg> page. */
+/*                                                                           */
+/*  The pattern bodies use small inline tile sizes (in pt, the same units   */
+/*  the page <g> uses after its Y-flip) chosen to match the default Lout   */
+/*  geometries.  All strokes/fills inside use currentColor, so the surface  */
+/*  using fill="url(#...)" picks up its own colour automatically.          */
+/*                                                                           */
+/*****************************************************************************/
+
+static void svg_emit_pattern_defs(void)
+{
+  if( out_fp == NULL ) return;
+  fputs("<defs>\n", out_fp);
+
+  /* striped: 1pt-wide horizontal bars at 2pt pitch.                       */
+  fputs(
+    "<pattern id=\"lout-tex-striped\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"2\" height=\"2\">"
+    "<rect x=\"0\" y=\"0\" width=\"2\" height=\"1\" fill=\"currentColor\"/>"
+    "</pattern>\n", out_fp);
+
+  /* grid: 1pt strokes forming a 2pt cell.                                */
+  fputs(
+    "<pattern id=\"lout-tex-grid\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"2\" height=\"2\">"
+    "<path d=\"M 0 0 H 2 M 0 0 V 2\" stroke=\"currentColor\" "
+    "stroke-width=\"1\" fill=\"none\"/></pattern>\n", out_fp);
+
+  /* dotted: 0.5pt-radius dots on a 2pt grid, centred in the cell.        */
+  fputs(
+    "<pattern id=\"lout-tex-dotted\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"2\" height=\"2\">"
+    "<circle cx=\"1\" cy=\"1\" r=\"0.5\" fill=\"currentColor\"/>"
+    "</pattern>\n", out_fp);
+
+  /* chessboard: 2pt squares in a 4pt tile.                              */
+  fputs(
+    "<pattern id=\"lout-tex-chessboard\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"4\" height=\"4\">"
+    "<rect x=\"0\" y=\"0\" width=\"2\" height=\"2\" fill=\"currentColor\"/>"
+    "<rect x=\"2\" y=\"2\" width=\"2\" height=\"2\" fill=\"currentColor\"/>"
+    "</pattern>\n", out_fp);
+
+  /* brickwork: 6x2 bricks stacked with a half-brick offset between rows. */
+  fputs(
+    "<pattern id=\"lout-tex-brickwork\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"6\" height=\"4\">"
+    "<path d=\"M 0 0 H 6 M 0 2 H 6 M 0 4 H 6 "
+    "M 0 0 V 2 M 6 0 V 2 M 3 2 V 4\" "
+    "stroke=\"currentColor\" stroke-width=\"0.5\" fill=\"none\"/>"
+    "</pattern>\n", out_fp);
+
+  /* honeycomb: regular hexagonal cells, R=2pt.  Two stacked hexagons    */
+  /* per tile so the tile (6 x ~7.088) wraps cleanly.                   */
+  fputs(
+    "<pattern id=\"lout-tex-honeycomb\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"6\" height=\"7.088\">"
+    "<path d=\"M 1 0 h 2 l 1 1.772 l -1 1.772 h -2 l -1 -1.772 Z "
+    "M 4 3.544 h 2 l 1 1.772 l -1 1.772 h -2 l -1 -1.772 Z\" "
+    "stroke=\"currentColor\" stroke-width=\"0.5\" fill=\"none\"/>"
+    "</pattern>\n", out_fp);
+
+  /* triangular: equilateral triangles, R=4pt.                          */
+  fputs(
+    "<pattern id=\"lout-tex-triangular\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"4\" height=\"7.088\">"
+    "<path d=\"M 0 0 L 4 0 L 0 7.088 L 4 7.088 "
+    "M 0 3.544 L 4 3.544\" "
+    "stroke=\"currentColor\" stroke-width=\"0.5\" fill=\"none\"/>"
+    "</pattern>\n", out_fp);
+
+  /* string: an asterisk glyph repeated on a 12pt grid.                  */
+  fputs(
+    "<pattern id=\"lout-tex-string\" patternUnits=\"userSpaceOnUse\" "
+    "width=\"12\" height=\"12\">"
+    "<text x=\"1\" y=\"10\" font-family=\"Times\" font-size=\"10\" "
+    "fill=\"currentColor\">*</text></pattern>\n", out_fp);
+
+  fputs("</defs>\n", out_fp);
+}
+
+
 static void svg_ps_init(svg_ps_state *s)
 {
   s->top = 0;
@@ -1393,6 +1608,7 @@ static void svg_ps_init(svg_ps_state *s)
   s->gs[0].baseline_m[2] = 0.0; s->gs[0].baseline_m[3] = 1.0;
   s->gs[0].baseline_m[4] = 0.0; s->gs[0].baseline_m[5] = 0.0;
   s->gs[0].clip_empty = 0;
+  s->gs[0].texture_kind = SVG_TEX_SOLID;
   /* svg_var_* persist across SVG_PrintGraphicObject calls (PS userdict     */
   /* semantics); they are initialised once by svg_psinterp_init.            */
   s->path[0] = '\0';
@@ -1745,7 +1961,16 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
       col = g->stroke_rgb;
     else
       col = "currentColor";
-    fprintf(out_fp, " fill=\"%s\"", col);
+    /* If a texture is in effect on the current gstate, use the matching     */
+    /* <pattern> as the fill, and set the SVG inheritable `color` property  */
+    /* so the pattern's currentColor strokes/fills pick up the active hue.  */
+    if( g->texture_kind > SVG_TEX_SOLID && g->texture_kind < SVG_TEX_COUNT )
+    {
+      fprintf(out_fp, " fill=\"url(#lout-tex-%s)\" color=\"%s\"",
+        svg_tex_names[g->texture_kind], col);
+    }
+    else
+      fprintf(out_fp, " fill=\"%s\"", col);
   }
   else
     fputs(" fill=\"none\"", out_fp);
@@ -2822,10 +3047,16 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_var_xsize = svg_ps_pop(s);
     return 1;
   }
-  if( strcmp(name, "LoutTextureSolid") == 0 ||
-      strcmp(name, "save_cp") == 0 ||
+  if( strcmp(name, "save_cp") == 0 ||
       strcmp(name, "restore_cp") == 0 )
     return 1;
+  if( strcmp(name, "LoutTextureSolid") == 0 )
+  {
+    /* PS: { null LoutSetTexture } bind def.  Clear any active texture so   */
+    /* subsequent fills go back to a plain colour.                          */
+    s->gs[s->gs_top].texture_kind = SVG_TEX_SOLID;
+    return 1;
+  }
   if( strcmp(name, "LoutSetTexture") == 0 )
   {
     /* PS: { pop } (no-texture build) or texture-stack manipulation.  Both    */
@@ -2834,18 +3065,40 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     /* leftover operand accumulated and eventually masked the connector     */
     /* outline/dashlength arguments of ldiagnodeend/ldiaglinkend, dropping  */
     /* the thin (0.48) connector strokes in late pages of the user guide.   */
-    (void) svg_ps_pop_value(s);
+    /* The argument here is either the value pushed by LoutMakeTexture       */
+    /* (kind == SVG_VK_NUM, num == texture-kind index) or null (for the     */
+    /* `null LoutSetTexture` sequence in LoutTextureSolid).                  */
+    svg_value v = svg_ps_pop_value(s);
+    if( v.kind == SVG_VK_NUM )
+    {
+      int k = (int) v.num;
+      if( k > SVG_TEX_SOLID && k < SVG_TEX_COUNT )
+        s->gs[s->gs_top].texture_kind = k;
+      else
+        s->gs[s->gs_top].texture_kind = SVG_TEX_SOLID;
+    }
+    else
+      s->gs[s->gs_top].texture_kind = SVG_TEX_SOLID;
     return 1;
   }
   if( strcmp(name, "LoutMakeTexture") == 0 )
   {
-    /* PS: consumes 11 operands and pushes one (a pattern or null).          */
-    int i;
+    /* PS: consumes 11 operands -- scale scalex scaley rotate hshift vshift   */
+    /* painttype bbox xstep ystep paintproc -- and pushes a "pattern" value.  */
+    /* In SVG we map the named textures (recognised by scanning the paint-   */
+    /* proc body for distinctive operators) onto pre-defined <pattern> defs  */
+    /* emitted at page open; the value pushed here carries the texture-kind  */
+    /* index that the subsequent LoutSetTexture stores on the gstate.        */
+    int i, kind;
     svg_value out;
-    for( i = 0; i < 11; i++ )
+    svg_value paintproc;
+    paintproc = svg_ps_pop_value(s);    /* paintproc (top)              */
+    kind = svg_tex_identify(&paintproc);
+    for( i = 0; i < 10; i++ )           /* remaining 10 operands         */
       (void) svg_ps_pop_value(s);
-    out.kind = SVG_VK_NULL;
-    out.num = 0.0; out.name = NULL; out.items = NULL; out.nitems = 0;
+    out.kind = SVG_VK_NUM;
+    out.num = (double) kind;
+    out.name = NULL; out.items = NULL; out.nitems = 0;
     out.dict_id = 0;
     svg_ps_push(s, &out);
     return 1;
