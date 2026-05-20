@@ -541,3 +541,51 @@ and translate. Recommend (a) for cleanliness; small change.
 - `lout/z51.c` - plain text back-end; smaller reference for stub
   shapes if z49.c is overwhelming.
 - `TODO.md` section 1 - parent task list this guide implements.
+
+## 10. User-guide regression notes
+
+Two fixes applied during user-guide review (2026-05-20):
+
+1. **Colour propagation into @Graphic** — `SVG_DefineGraphicNames` now
+   copies `colour(save_style(x))` into the PS interpreter's per-gstate
+   `fill_rgb`/`stroke_rgb`.  PS mode achieves this implicitly because
+   `SetColourAndTexture` writes `... setrgbcolor` into the PS stream
+   before `LoutGraphic`; SVG has no implicit current point, so the
+   colour has to be plumbed into the C-side gstate explicitly.  Without
+   the fix, paths inside `@Graphic` that did not issue their own
+   `setrgbcolor` fell back to `fill="currentColor"` which inherits to
+   black at the document level.  This made every page that exercised
+   `@Box paint{darkred}` / `@CurveBox paint{...}` / `@Colour ... @FilledBox`
+   render those swatches as solid black.  The big visible win is the
+   chapter 8 colour gallery (user-guide page 165): all 25 colour boxes
+   now display their correct hues instead of being uniform black.
+
+2. **System dict pushes** — `errordict`, `systemdict`, `globaldict`,
+   `statusdict`, `$error` (previously unknown ops) now push the
+   userdict slot as a stand-in so that the `<dict> begin ... end`
+   stanzas at the top of every `*.lpg` prologue stay balanced.  Before
+   the fix, `errordict` warned and emitted nothing, then the trailing
+   `begin` popped whatever happened to be left on the operand stack
+   (typically a literal name from earlier setup), corrupting later
+   operations.  Suppresses the recurring "unknown PostScript operator
+   'errordict'" warning and removes a class of subtle state-drift bugs.
+
+Both fixes pass 26/26 of the regression suite.
+
+### Remaining known issues
+
+- @Diag connector lines (thin paths drawn via `ldiagdosegpath`/`ldiaglinkend`)
+  still drop out on several user-guide pages (e.g. labels 195, 200, 205,
+  210).  Reproducing the failure outside the full user-guide build is
+  difficult: isolated minimal `.lt` inputs with the same `@SyntaxDiag`
+  bodies render their connectors correctly.  The bug appears to be a
+  cross-document state leak in the PS interpreter; node outlines and
+  arrowheads (paths emitted at `stroke-width=0.96`) still render fine,
+  but the thinner connector paths (`stroke-width=0.48`) go missing on
+  the affected pages.  Needs more investigation; likely a corrupted
+  dict slot, CTM stack imbalance, or path accumulator that survives an
+  earlier @Graphic block.
+- Texture patterns (`LoutMakeTexture`/`LoutSetTexture` no-ops):
+  `@Box paint{black} texture{brickwork}` collapses to a solid black
+  rectangle in SVG.  Documented design choice; needs `<pattern>`
+  emission in `<defs>` to fix.

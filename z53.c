@@ -2802,8 +2802,18 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "userdict") == 0 )
+  if( strcmp(name, "userdict") == 0 ||
+      strcmp(name, "systemdict") == 0 ||
+      strcmp(name, "globaldict") == 0 ||
+      strcmp(name, "errordict") == 0 ||
+      strcmp(name, "statusdict") == 0 ||
+      strcmp(name, "$error") == 0 )
   {
+    /* Push the userdict slot as a stand-in for any system-defined dict.   */
+    /* This keeps `<dictname> begin ... end` (used by prologue stanzas     */
+    /* like `errordict begin /handleerror {...} def end` in diagf.lpg) in  */
+    /* sync with the dict stack so that subsequent operations don't see a */
+    /* stale operand left behind by an unbalanced `begin`.                */
     svg_value out;
     out.kind = SVG_VK_DICT;
     out.num = 0.0;
@@ -3820,6 +3830,9 @@ static void SVG_DefineGraphicNames(OBJECT x)
   /* Capture the same numbers that PS_DefineGraphicNames pushes onto the    */
   /* PS stack before "LoutGraphic", so the interpreter inside              */
   /* SVG_PrintGraphicObject can resolve `xsize`, `ysize`, etc.             */
+  COLOUR_NUM col;
+  char colbuf[24];
+  const char *colstr;
   cur_gr_xsize = size(x, COLM);
   cur_gr_ysize = size(x, ROWM);
   cur_gr_xmark = back(x, COLM);
@@ -3828,6 +3841,31 @@ static void SVG_DefineGraphicNames(OBJECT x)
   cur_gr_loutv = width(line_gap(save_style(x)));
   cur_gr_louts = width(space_gap(save_style(x)));
   cur_gr_set   = TRUE;
+
+  /* Propagate the current Lout colour (set by an enclosing @Colour or     */
+  /* @SetColour) into the PS interpreter's per-gstate fill/stroke colour.  */
+  /* PS mode achieves this naturally via SetColourAndTexture writing a    */
+  /* "...setrgbcolor" command into the PS output before LoutGraphic; SVG  */
+  /* has no implicit current point so we mirror it explicitly.  This is   */
+  /* what makes @Box paint{darkred}, @FilledBox under @Colour, and other  */
+  /* colour-bearing @Graphic blocks render in the right colour rather     */
+  /* than the SVG default "currentColor" (which inherits to black).       */
+  col = colour(save_style(x));
+  if( col > 0 )
+  {
+    colstr = svg_colour_rgb(col, colbuf);
+    if( colstr != NULL )
+    {
+      strncpy(g_psstate.gs[g_psstate.gs_top].fill_rgb, colstr,
+              sizeof(g_psstate.gs[g_psstate.gs_top].fill_rgb) - 1);
+      g_psstate.gs[g_psstate.gs_top].fill_rgb
+        [sizeof(g_psstate.gs[g_psstate.gs_top].fill_rgb) - 1] = '\0';
+      strncpy(g_psstate.gs[g_psstate.gs_top].stroke_rgb, colstr,
+              sizeof(g_psstate.gs[g_psstate.gs_top].stroke_rgb) - 1);
+      g_psstate.gs[g_psstate.gs_top].stroke_rgb
+        [sizeof(g_psstate.gs[g_psstate.gs_top].stroke_rgb) - 1] = '\0';
+    }
+  }
 }
 
 static void SVG_SaveTranslateDefineSave(OBJECT x, FULL_LENGTH xdist,
