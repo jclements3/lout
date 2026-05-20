@@ -622,3 +622,51 @@ before the fix) and pool_used stays under 20 indefinitely.
   prebuilt `<pattern>` elements, or run the texture procedure through
   the interpreter while redirecting its draw ops into a per-pattern
   buffer.
+
+  **2026-05-20 update.**  `svg_tex_identify` now hardened against custom
+  (non-coltex) paintprocs.  Each named-texture branch in z53.c requires
+  positive corroborating signals (e.g. `dotted` needs `arc + fill` AND
+  the absence of setdash/stroke/closepath/lineto; `chessboard` needs
+  `>=2 moveto`, `0 lineto`, `>=4 rlineto`).  Custom procs that match
+  none of these patterns fall through to `SVG_TEX_SOLID`, which the
+  caller interprets as "no <pattern> fill" -- so the surface keeps its
+  base colour rather than crashing or being mis-mapped to an unrelated
+  named texture.  All 8 named textures continue to round-trip through
+  `/tmp/tex.lt` (the small per-texture box document used for spot
+  checking).
+
+- **@Graph plot — symbol/curve alignment (user-guide pp 248, 262).**
+  The previous `symbolsize`-drift fix (the C-side shortcut at z53.c
+  ~3000 that intercepts `square`/`docircle`/etc. and draws the symbol
+  directly from dict-bound `xcurr`/`ycurr`/`symbolsize`/`symbollinewidth`)
+  removes the page-sized blob, but leaves the plotted symbols a few
+  device-pt away from the curve and the axis ticks slightly off.  The
+  C-side `trpoint` arithmetic at z53.c:3101-3110 mirrors graphf.lpg's
+  `trpoint`, but has two known minor divergences vs. the PS interpreter
+  drawing the curve and axes:
+
+  1. `xdecr`/`ydecr` are looked up via `vv.kind == SVG_VK_NUM`, but
+     graphf.lpg's `xset` defines them via `/xdecr exch def` from a
+     boolean argument.  In our PS interpreter booleans are stored with
+     `kind == SVG_VK_BOOL`, so the lookup misses and the symbol code
+     always treats the axis as ascending.  Harmless for ascending
+     graphs; visible misalignment on descending axes.
+  2. `xtr`/`ytr` collapse `x <= 0` to `0` via `plog` when log scaling is
+     active.  The C shortcut leaves such points un-transformed instead.
+     Again harmless for the strictly-positive data in the user guide
+     examples.
+
+  Neither matches the reported "few pt of slop on ascending linear
+  axes" symptom, so the misalignment likely comes from a different
+  source -- candidates include (a) a stale `xextra`/`yextra` left over
+  from a prior @Graph in the same document, (b) the symbol path being
+  drawn into the graph's own gsave/grestore frame instead of the
+  enclosing axis frame (the PS interpreter walks both, the C shortcut
+  uses whatever frame is current when the symbol op fires), or (c) a
+  half-pt offset introduced by the C side treating `slw` as already
+  scaled when the PS proc's `do<shape>` form scales it again via the
+  enclosing CTM.  Investigation deferred; rebuilding the user guide
+  to verify takes ~15 min for the 3-pass cross-ref resolution, which
+  consumed the bulk of this session's time-box.  Note for next pass:
+  the boolean-vs-numeric `xdecr` lookup is a one-line patch worth
+  doing on principle even if it isn't the dominant offender.

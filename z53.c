@@ -1479,29 +1479,61 @@ static int svg_tex_identify(const svg_value *proc)
   t.n_rlineto = t.n_lineto = t.n_moveto = 0;
   svg_tex_scan_walk(proc->items, proc->nitems, &t);
 
-  /* string: only one that uses findfont/show.                             */
-  if( t.has_findfont || t.has_show )            return SVG_TEX_STRING;
-  /* dotted: only one that uses arc.                                       */
-  if( t.has_arc )                               return SVG_TEX_DOTTED;
-  /* the three stroke-with-dash textures use setdash + stroke; tell them   */
-  /* apart by closepath count and the presence of plain lineto (absolute):*/
-  /*   brickwork  -> 0 closepath, no lineto, ~6 rlineto, ~5 moveto       */
-  /*   honeycomb  -> 1 closepath, no lineto, ~7 rlineto, 1 moveto        */
-  /*   triangular -> 1 closepath, >=2 lineto, ~2 rlineto                  */
-  if( t.has_setdash && t.has_stroke )
+  /* Reference signatures (from coltex.ld @TextureCommand bodies):           */
+  /*   striped     fill, closepath, 1 moveto, 1 lineto, 2 rlineto            */
+  /*   grid        fill, closepath, 1 moveto, 1 lineto, 4 rlineto            */
+  /*   dotted      arc, fill                                                 */
+  /*   chessboard  fill, 2 closepath, 2 moveto, 0 lineto, 6 rlineto          */
+  /*   brickwork   setdash, stroke, 0 closepath, 0 lineto, ~5 moveto, ~6 rlineto */
+  /*   honeycomb   setdash, stroke, 1 closepath, 1 moveto, 0 lineto, 7 rlineto */
+  /*   triangular  setdash, stroke, 1 closepath, 2 moveto, 2 lineto, 2 rlineto */
+  /*   string      findfont + show                                           */
+  /*                                                                         */
+  /* Each branch below requires positive corroborating signals so that an     */
+  /* unrecognised custom user paintproc (e.g. one that happens to use `arc` */
+  /* but does not look like Lout's `dotted`) falls through to SVG_TEX_SOLID  */
+  /* instead of being mis-mapped to a named pattern.                         */
+
+  /* string: must have BOTH findfont and show; nothing else uses them.       */
+  if( t.has_findfont && t.has_show )            return SVG_TEX_STRING;
+
+  /* dotted: arc + fill, no setdash, no stroke, no closepath, no lineto.    */
+  if( t.has_arc && t.has_fill && !t.has_setdash && !t.has_stroke &&
+      !t.has_closepath && t.n_lineto == 0 )     return SVG_TEX_DOTTED;
+
+  /* setdash+stroke family (brickwork/honeycomb/triangular).                */
+  if( t.has_setdash && t.has_stroke && !t.has_fill && !t.has_arc )
   {
-    if( t.has_closepath && t.n_lineto >= 2 )    return SVG_TEX_TRIANGULAR;
-    if( t.has_closepath )                       return SVG_TEX_HONEYCOMB;
-    return SVG_TEX_BRICKWORK;
+    /* triangular: 1 closepath, 2 lineto, 2 rlineto.                        */
+    if( t.has_closepath && t.n_lineto >= 2 && t.n_rlineto >= 1 )
+      return SVG_TEX_TRIANGULAR;
+    /* honeycomb: 1 closepath, 0 lineto, >=6 rlineto.                       */
+    if( t.has_closepath && t.n_lineto == 0 && t.n_rlineto >= 6 )
+      return SVG_TEX_HONEYCOMB;
+    /* brickwork: 0 closepath, 0 lineto, >=4 rlineto, >=3 moveto.           */
+    if( !t.has_closepath && t.n_lineto == 0 && t.n_rlineto >= 4 &&
+        t.n_moveto >= 3 )                       return SVG_TEX_BRICKWORK;
+    /* setdash+stroke proc that doesn't match any of the named patterns ->  */
+    /* unknown custom texture; fall through to SOLID below.                 */
   }
-  /* grid vs striped vs chessboard: all use closepath fill, no setdash.   */
-  /* chessboard has 2 moveto's; grid has 5 rlineto's; striped has 2.      */
-  if( t.has_closepath && t.has_fill )
+  /* fill family (striped/grid/chessboard): closepath + fill, no setdash.   */
+  if( t.has_closepath && t.has_fill && !t.has_setdash && !t.has_stroke &&
+      !t.has_arc )
   {
-    if( t.n_moveto >= 2 )                       return SVG_TEX_CHESSBOARD;
-    if( t.n_rlineto >= 4 )                      return SVG_TEX_GRID;
-    return SVG_TEX_STRIPED;
+    /* chessboard: 2 moveto, 0 lineto, >=4 rlineto.                         */
+    if( t.n_moveto >= 2 && t.n_lineto == 0 && t.n_rlineto >= 4 )
+      return SVG_TEX_CHESSBOARD;
+    /* grid: 1 moveto, 1 lineto, >=4 rlineto.                               */
+    if( t.n_moveto == 1 && t.n_lineto >= 1 && t.n_rlineto >= 4 )
+      return SVG_TEX_GRID;
+    /* striped: 1 moveto, 1 lineto, 2 rlineto.                              */
+    if( t.n_moveto == 1 && t.n_lineto >= 1 && t.n_rlineto >= 1 &&
+        t.n_rlineto < 4 )                       return SVG_TEX_STRIPED;
   }
+  /* Unknown / custom paintproc: emit solid colour fallback.  This is the   */
+  /* sentinel branch -- svg_emit_pattern_defs has no entry for SOLID, and    */
+  /* svg_ps_emit_path skips the texture fill when texture_kind==SVG_TEX_SOLID, */
+  /* so the surface receives its currentColor fill with no pattern overlay.  */
   return SVG_TEX_SOLID;
 }
 
@@ -3058,9 +3090,16 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
             xextra = vv.num;
           if( svg_dict_stack_lookup("yextra", &vv) && vv.kind == SVG_VK_NUM )
             yextra = vv.num;
-          if( svg_dict_stack_lookup("xdecr", &vv) && vv.kind == SVG_VK_NUM )
+          /* xdecr/ydecr: graphf.lpg's xset/yset bind these from a boolean    */
+          /* argument via `/xdecr exch def`, so the dict entry has kind BOOL  */
+          /* (vv.num == 1.0 for true, 0.0 for false), not NUM.  Accept both   */
+          /* so the symbol position tracks descending-axis graphs the same    */
+          /* way the curve does.                                              */
+          if( svg_dict_stack_lookup("xdecr", &vv) &&
+              (vv.kind == SVG_VK_NUM || vv.kind == SVG_VK_BOOL) )
             xdecr = vv.num;
-          if( svg_dict_stack_lookup("ydecr", &vv) && vv.kind == SVG_VK_NUM )
+          if( svg_dict_stack_lookup("ydecr", &vv) &&
+              (vv.kind == SVG_VK_NUM || vv.kind == SVG_VK_BOOL) )
             ydecr = vv.num;
           if( svg_dict_stack_lookup("xlog", &vv) && vv.kind == SVG_VK_NUM )
             xlog = vv.num;
