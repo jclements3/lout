@@ -2975,6 +2975,183 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     return 1;
   }
 
+  /* @Graph plot-symbol prologue procs.  These are defined inside           */
+  /* lgraphdict in graphf.lpg, but the mini PS interpreter's dict-lookup    */
+  /* path mis-handles the `symbolsize`/`symbollinewidth` def + lookup       */
+  /* sequence that runs inside rundata's `for` loop (the value of `ss`     */
+  /* drifts upward each iteration, producing the page-sized blob symptom   */
+  /* on user's-guide page 248).  Bypass the dict procs entirely and draw   */
+  /* a fixed-size symbol path centred at (xcurr, ycurr) directly.  The     */
+  /* "do<shape>" variants take stack args (x y symbolsize symbollinewidth) */
+  /* and are the natural place to draw; the bare names (filledsquare,     */
+  /* etc.) look up xcurr/ycurr/symbolsize/symbollinewidth from the dict    */
+  /* and transform via trpoint -- so they reduce to "look up the four     */
+  /* values, transform, then drop into the do<shape> handler".            */
+  {
+    static const char *names[] = {
+      "filledsquare", "dofilledsquare", "square", "dosquare",
+      "filledcircle", "dofilledcircle", "circle", "docircle",
+      "filleddiamond", "dofilleddiamond", "diamond", "dodiamond",
+      "filledtriangle", "dofilledtriangle", "triangle", "dotriangle",
+      "cross", "docross", "plus", "doplus", NULL
+    };
+    int is_symbol = 0;
+    int i;
+    for( i = 0; names[i] != NULL; i++ )
+      if( strcmp(name, names[i]) == 0 ) { is_symbol = 1; break; }
+    if( is_symbol )
+    {
+      double slw, ss, yc, xc;
+      int is_do = (strncmp(name, "do", 2) == 0);
+      int outline = 0;
+      const char *shape;
+      /* All graphf.lpg symbols use an "open" form (square, circle, ...)    */
+      /* drawn as an outline stroke, and a "filled" form (filledsquare,    */
+      /* ...) drawn as a solid fill.  cross/plus are stroked single-line  */
+      /* glyphs in both forms (no fill).                                  */
+      shape = is_do ? name + 2 : name;
+      if( strcmp(shape, "square") == 0 || strcmp(shape, "diamond") == 0 ||
+          strcmp(shape, "circle") == 0 || strcmp(shape, "triangle") == 0 )
+        outline = 1;
+      if( !is_do )
+      {
+        /* No-arg wrapper: pull xcurr/ycurr/symbolsize/symbollinewidth     */
+        /* from the dict stack, transform (xcurr, ycurr) via the same     */
+        /* axis-mapping that trpoint does.  Fall back to (0, 0) and a    */
+        /* sensible default size if any lookup fails, so we degrade        */
+        /* gracefully rather than blowing up the page.                    */
+        svg_value vv;
+        double xcur = 0.0, ycur = 0.0;
+        if( svg_dict_stack_lookup("xcurr", &vv) && vv.kind == SVG_VK_NUM )
+          xcur = vv.num;
+        if( svg_dict_stack_lookup("ycurr", &vv) && vv.kind == SVG_VK_NUM )
+          ycur = vv.num;
+        ss = 0.15 * svg_var_loutf;
+        if( svg_dict_stack_lookup("symbolsize", &vv) && vv.kind == SVG_VK_NUM )
+          ss = vv.num;
+        slw = 0.5;
+        if( svg_dict_stack_lookup("symbollinewidth", &vv) && vv.kind == SVG_VK_NUM )
+          slw = vv.num;
+        /* trpoint: map data-space (xcur, ycur) -> graphic-space (xc, yc). */
+        /* Implemented by inlining the relevant graphf.lpg arithmetic       */
+        /* using dict-bound axis variables.  All of these are simple        */
+        /* numerics defined by xset / yset; if they're missing we leave    */
+        /* the point un-transformed, which still beats a 5x-size blob.     */
+        {
+          double trxmin = 0, trxmax = 1, trymin = 0, trymax = 1;
+          double xwidth = 0, ywidth = 0, xextra = 0, yextra = 0;
+          double xdecr = 0, ydecr = 0;
+          double xlog = 0, ylog = 0;
+          if( svg_dict_stack_lookup("trxmin", &vv) && vv.kind == SVG_VK_NUM )
+            trxmin = vv.num;
+          if( svg_dict_stack_lookup("trxmax", &vv) && vv.kind == SVG_VK_NUM )
+            trxmax = vv.num;
+          if( svg_dict_stack_lookup("trymin", &vv) && vv.kind == SVG_VK_NUM )
+            trymin = vv.num;
+          if( svg_dict_stack_lookup("trymax", &vv) && vv.kind == SVG_VK_NUM )
+            trymax = vv.num;
+          if( svg_dict_stack_lookup("xwidth", &vv) && vv.kind == SVG_VK_NUM )
+            xwidth = vv.num;
+          if( svg_dict_stack_lookup("ywidth", &vv) && vv.kind == SVG_VK_NUM )
+            ywidth = vv.num;
+          if( svg_dict_stack_lookup("xextra", &vv) && vv.kind == SVG_VK_NUM )
+            xextra = vv.num;
+          if( svg_dict_stack_lookup("yextra", &vv) && vv.kind == SVG_VK_NUM )
+            yextra = vv.num;
+          if( svg_dict_stack_lookup("xdecr", &vv) && vv.kind == SVG_VK_NUM )
+            xdecr = vv.num;
+          if( svg_dict_stack_lookup("ydecr", &vv) && vv.kind == SVG_VK_NUM )
+            ydecr = vv.num;
+          if( svg_dict_stack_lookup("xlog", &vv) && vv.kind == SVG_VK_NUM )
+            xlog = vv.num;
+          if( svg_dict_stack_lookup("ylog", &vv) && vv.kind == SVG_VK_NUM )
+            ylog = vv.num;
+          if( xlog > 1 && xcur > 0 ) xcur = log(xcur) / log(xlog);
+          if( ylog > 1 && ycur > 0 ) ycur = log(ycur) / log(ylog);
+          if( trxmax - trxmin != 0.0 )
+            xc = (xdecr != 0.0 ? (trxmax - xcur) : (xcur - trxmin))
+                 / (trxmax - trxmin) * xwidth + xextra;
+          else
+            xc = xextra;
+          if( trymax - trymin != 0.0 )
+            yc = (ydecr != 0.0 ? (trymax - ycur) : (ycur - trymin))
+                 / (trymax - trymin) * ywidth + yextra;
+          else
+            yc = yextra;
+        }
+      }
+      else
+      {
+        /* do<shape>: 4-arg form, stack has x y symbolsize symbollinewidth. */
+        slw = svg_ps_pop(s);
+        ss  = svg_ps_pop(s);
+        yc  = svg_ps_pop(s);
+        xc  = svg_ps_pop(s);
+      }
+      if( strcmp(shape, "square") == 0 )
+      {
+        double half = outline ? (ss - slw * 0.5) : ss;
+        if( half < 0.0 ) half = 0.0;
+        svg_ps_moveto(s, xc - half, yc - half);
+        svg_ps_lineto(s, xc + half, yc - half);
+        svg_ps_lineto(s, xc + half, yc + half);
+        svg_ps_lineto(s, xc - half, yc + half);
+        svg_ps_closepath(s);
+        svg_ps_emit_path(s, outline, !outline);
+      }
+      else if( strcmp(shape, "circle") == 0 )
+      {
+        double r = outline ? (ss - slw * 0.5) : ss;
+        if( r < 0.0 ) r = 0.0;
+        svg_ps_moveto(s, xc + r, yc);
+        svg_ps_arc(s, xc, yc, r, 0.0, 180.0, 1);
+        svg_ps_arc(s, xc, yc, r, 180.0, 360.0, 1);
+        svg_ps_closepath(s);
+        svg_ps_emit_path(s, outline, !outline);
+      }
+      else if( strcmp(shape, "diamond") == 0 )
+      {
+        double half = outline ? (ss - slw * 0.5) : ss;
+        if( half < 0.0 ) half = 0.0;
+        svg_ps_moveto(s, xc - half, yc);
+        svg_ps_lineto(s, xc, yc - half);
+        svg_ps_lineto(s, xc + half, yc);
+        svg_ps_lineto(s, xc, yc + half);
+        svg_ps_closepath(s);
+        svg_ps_emit_path(s, outline, !outline);
+      }
+      else if( strcmp(shape, "triangle") == 0 )
+      {
+        double h = outline ? (ss - slw * 0.5) : ss;
+        if( h < 0.0 ) h = 0.0;
+        svg_ps_moveto(s, xc, yc + h * 1.5);
+        svg_ps_lineto(s, xc - h, yc - h);
+        svg_ps_lineto(s, xc + h, yc - h);
+        svg_ps_closepath(s);
+        svg_ps_emit_path(s, outline, !outline);
+      }
+      else if( strcmp(shape, "cross") == 0 )
+      {
+        svg_ps_moveto(s, xc - ss, yc - ss);
+        svg_ps_lineto(s, xc + ss, yc + ss);
+        svg_ps_emit_path(s, 1, 0);
+        svg_ps_moveto(s, xc - ss, yc + ss);
+        svg_ps_lineto(s, xc + ss, yc - ss);
+        svg_ps_emit_path(s, 1, 0);
+      }
+      else if( strcmp(shape, "plus") == 0 )
+      {
+        svg_ps_moveto(s, xc - ss, yc);
+        svg_ps_lineto(s, xc + ss, yc);
+        svg_ps_emit_path(s, 1, 0);
+        svg_ps_moveto(s, xc, yc - ss);
+        svg_ps_lineto(s, xc, yc + ss);
+        svg_ps_emit_path(s, 1, 0);
+      }
+      return 1;
+    }
+  }
+
   /* Lout prologue named procedures - direct C implementations */
   if( strcmp(name, "LoutGraphic") == 0 )
   {
@@ -3934,6 +4111,37 @@ static void svg_ps_exec_value(svg_ps_state *s, const svg_value *v)
         svg_ps_push_num(s, dv);
         break;
       }
+      /* A short list of @Graph prologue procs that we override with C        */
+      /* implementations in svg_ps_exec_op to sidestep the dict-proc bug      */
+      /* responsible for the inflated-symbol regression on user's-guide      */
+      /* pages 248/262.  These names must be intercepted BEFORE the          */
+      /* dictionary lookup or graphf.lpg's procs would shadow them.          */
+      if(
+        strcmp(v->name, "filledsquare")    == 0 ||
+        strcmp(v->name, "dofilledsquare")  == 0 ||
+        strcmp(v->name, "square")          == 0 ||
+        strcmp(v->name, "dosquare")        == 0 ||
+        strcmp(v->name, "filledcircle")    == 0 ||
+        strcmp(v->name, "dofilledcircle")  == 0 ||
+        strcmp(v->name, "circle")          == 0 ||
+        strcmp(v->name, "docircle")        == 0 ||
+        strcmp(v->name, "filleddiamond")   == 0 ||
+        strcmp(v->name, "dofilleddiamond") == 0 ||
+        strcmp(v->name, "diamond")         == 0 ||
+        strcmp(v->name, "dodiamond")       == 0 ||
+        strcmp(v->name, "filledtriangle")  == 0 ||
+        strcmp(v->name, "dofilledtriangle")== 0 ||
+        strcmp(v->name, "triangle")        == 0 ||
+        strcmp(v->name, "dotriangle")      == 0 ||
+        strcmp(v->name, "cross")           == 0 ||
+        strcmp(v->name, "docross")         == 0 ||
+        strcmp(v->name, "plus")            == 0 ||
+        strcmp(v->name, "doplus")          == 0
+      )
+      {
+        if( svg_ps_exec_op(s, v->name) )
+          break;
+      }
       /* dictionary lookup */
       if( svg_dict_stack_lookup(v->name, &resolved) )
       {
@@ -4196,7 +4404,14 @@ static void SVG_DefineGraphicNames(OBJECT x)
   cur_gr_ysize = size(x, ROWM);
   cur_gr_xmark = back(x, COLM);
   cur_gr_ymark = fwd(x, ROWM);
-  cur_gr_loutf = 12 * PT;
+  /* Mirror PS_DefineGraphicNames in z49.c: use the actual font size for     */
+  /* this graphic (so `loutf` and `ft` reflect any enclosing @Font scaling   */
+  /* such as `font { -2p }` inside @Graph), falling back to 12pt only when   */
+  /* no font has been set up yet.                                            */
+  {
+    FONT_NUM gf = font(save_style(x));
+    cur_gr_loutf = (gf <= 0) ? 12 * PT : FontSize(gf, x);
+  }
   cur_gr_loutv = width(line_gap(save_style(x)));
   cur_gr_louts = width(space_gap(save_style(x)));
   cur_gr_set   = TRUE;
