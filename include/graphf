@@ -231,10 +231,13 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	       # SVG override: inline the cross instead of calling docross from
-	       # lgraphdict (z53.c can't evaluate the dict-procedure body).
-	       "newpath 0 0 moveto xsize ysize lineto 0 ysize moveto"
-	       "xsize 0 lineto" symbollinewidth "setlinewidth [] 0 setdash 0 setlinecap stroke"
+	       # SVG: same as PostScript -- z53.c intercepts docross and reads
+	       # symbollinewidth from the stack directly.  Inlining the path here
+	       # is fragile because the @PSLengths default "currentlinewidth" is
+	       # not recognised by z53.c and leaves a stale stack operand that
+	       # setlinewidth then misinterprets.
+	       "lgraphdict begin xmark ymark xmark" symbollinewidth "docross"
+	       // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -272,9 +275,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline plus shape instead of dict call.
-	      "newpath xmark 0 moveto xmark ysize lineto 0 ymark moveto"
-	      "xsize ymark lineto" symbollinewidth "setlinewidth [] 0 setdash 0 setlinecap stroke"
+	      # SVG: same as PostScript -- z53.c intercepts doplus.
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "doplus"
+	      // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -312,9 +315,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline open square instead of dict call.
-	      "newpath 0 0 moveto xsize 0 lineto xsize ysize lineto"
-	      "0 ysize lineto closepath" symbollinewidth "setlinewidth [] 0 setdash stroke"
+	      # SVG: same as PostScript -- z53.c intercepts dosquare.
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "dosquare"
+	      // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -351,9 +354,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline filled square instead of dict call.
-	      "newpath 0 0 moveto xsize 0 lineto xsize ysize lineto 0 ysize"
-	      "lineto closepath fill"
+	      # SVG: same as PostScript -- z53.c intercepts dofilledsquare.
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilledsquare" // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -390,9 +393,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline open diamond instead of dict call.
-	      "newpath 0 ymark moveto xmark 0 lineto xsize ymark lineto"
-	      "xmark ysize lineto closepath" symbollinewidth "setlinewidth [] 0 setdash stroke"
+	      # SVG: same as PostScript -- z53.c intercepts dodiamond.
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "dodiamond"
+	      // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -430,9 +433,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline filled diamond instead of dict call.
-	      "newpath 0 ymark moveto xmark 0 lineto xsize ymark lineto"
-	      "xmark ysize lineto closepath fill"
+	      # SVG: same as PostScript -- z53.c intercepts dofilleddiamond.
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilleddiamond" // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -470,9 +473,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline open circle instead of dict call.
-	      "newpath xmark ymark xmark 0 360 arc"
-	      symbollinewidth "setlinewidth [] 0 setdash stroke"
+	      # SVG: same as PostScript -- z53.c intercepts docircle.
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "docircle"
+	      // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -534,8 +537,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline filled circle instead of dict call.
-	      "newpath xmark ymark xmark 0 360 arc fill"
+	      # SVG: same as PostScript -- z53.c intercepts dofilledcircle.
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilledcircle" // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -602,9 +606,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline open triangle instead of dict call.
-	      "newpath 0 0 moveto xsize 0 lineto xmark ysize 1.25 mul lineto"
-	      "closepath" symbollinewidth "setlinewidth [] 0 setdash stroke"
+	      # SVG: same as PostScript -- z53.c intercepts dotriangle.
+	      "lgraphdict begin xmark ymark xmark" symbollinewidth "dotriangle"
+	      // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
@@ -641,9 +645,9 @@ def @GraphSetup
 	SVG        @Yield {
 	    @HContract @VContract
 	    {
-	      # SVG override: inline filled triangle instead of dict call.
-	      "newpath 0 0 moveto xsize 0 lineto xmark ysize 1.25 mul lineto"
-	      "closepath fill"
+	      # SVG: same as PostScript -- z53.c intercepts dofilledtriangle.
+	      "lgraphdict begin xmark ymark xmark"
+	      symbollinewidth "dofilledtriangle" // "end"
 	    }
 	    @Graphic {symbolsize @High symbolsize @Wide ^|
 	        symbolsize @Wide ^/ symbolsize @High}
