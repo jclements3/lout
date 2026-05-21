@@ -13,6 +13,38 @@ User guide build (`doc/user/all`), `O3` build, this WSL2 box:
 | PS   | `lout -r3 all -o user.ps`     | 1m 16s  | 0m 46s  | 0m 2s  |
 | SVG  | `lout -r3 -G all -o user.svg` | 2m 10s  | 1m 05s  | 0m 3s  |
 
+### 1.1 Cumulative speedup tracking (single-pass `lout -G all`)
+
+Stable, warm-cache, single-pass timings on the user-guide build
+(`cd doc/user && rm -f *.li && time ../../lout -I ../../include -I . -G all
+> /tmp/user.svg`).  Each row is layered on top of the previous:
+
+| Stage                                           | real    | user    | sys    | delta vs base |
+|-------------------------------------------------|---------|---------|--------|---------------|
+| baseline (`24d76b4`, dict-hash already shipped) | 37.6 s  | 31.9 s  | 0.42 s | -             |
+| + #1 hoist `filledsquare/...` strcmp guard      | 36.2 s  | 30.8 s  | 0.41 s | real -3.7%    |
+| + #2 `setvbuf(out_fp, 128 KiB)` + flush         | 36.5 s  | 30.8 s  | 0.41 s | real -2.9%    |
+| + #3 memoize parsed @Graphic token streams      | 35.6 s  | 30.2 s  | 0.34 s | real -5.3%    |
+
+Cumulative wall-time delta over the dict-hash baseline: **real -5.3%**,
+**user -5.3%**, **sys -19%**.  Below the 25-40% goal -- once
+`svg_dict_stack_lookup` was hashed (commit `24d76b4`), the remaining
+strcmp clusters and stdio costs are individually small.  Item #4 (hash
+dispatch for `svg_ps_exec_op`'s 150-case chain) is the largest remaining
+opportunity but requires a much heavier refactor; skipped this round
+(see "Item 4 status" below).
+
+### 1.2 Item 4 status (deferred)
+
+The 150-case strcmp chain inside `svg_ps_exec_op` (z53.c ~2645-4150) is
+the largest single remaining strcmp cluster.  A safe rewrite to a hashed
+dispatch table (FNV-1a + linear probing, like `svg_dict_lookup`) would
+need either (a) a per-op `enum op_id` + 150-case `switch`, or (b) a
+shared `name_hash` precompute at the function top plus a length-gated
+`MATCH(s, h_s)` macro at every site -- both 150+ line mechanical edits.
+Deferred to a future session.  Expected residual gain: 2-4% wall.
+
+
 SVG is **~1.7x slower wall, ~1.4x slower user** on `-r3`. The 3x figure on
 the full 7-pass build is consistent with this once xref churn is included:
 SVG output (`10.4 MB`) is also ~10x larger than PS, so I/O matters at the
