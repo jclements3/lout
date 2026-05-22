@@ -25,6 +25,7 @@ Stable, warm-cache, single-pass timings on the user-guide build
 | + #1 hoist `filledsquare/...` strcmp guard      | 36.2 s  | 30.8 s  | 0.41 s | real -3.7%    |
 | + #2 `setvbuf(out_fp, 128 KiB)` + flush         | 36.5 s  | 30.8 s  | 0.41 s | real -2.9%    |
 | + #3 memoize parsed @Graphic token streams      | 35.6 s  | 30.2 s  | 0.34 s | real -5.3%    |
+| + #4 hash `svg_ps_exec_op` dispatch (`2a33e3d`) | ~32 s   | ~22 s   | -      | real -15% (and ~-58% vs the pre-perf-work ~77 s wall) |
 
 Cumulative wall-time delta over the dict-hash baseline: **real -5.3%**,
 **user -5.3%**, **sys -19%**.  Below the 25-40% goal -- once
@@ -34,15 +35,32 @@ dispatch for `svg_ps_exec_op`'s 150-case chain) is the largest remaining
 opportunity but requires a much heavier refactor; skipped this round
 (see "Item 4 status" below).
 
-### 1.2 Item 4 status (deferred)
+### 1.2 Item 4 status (landed 2026-05-21, commit `2a33e3d`)
 
-The 150-case strcmp chain inside `svg_ps_exec_op` (z53.c ~2645-4150) is
-the largest single remaining strcmp cluster.  A safe rewrite to a hashed
-dispatch table (FNV-1a + linear probing, like `svg_dict_lookup`) would
-need either (a) a per-op `enum op_id` + 150-case `switch`, or (b) a
-shared `name_hash` precompute at the function top plus a length-gated
-`MATCH(s, h_s)` macro at every site -- both 150+ line mechanical edits.
-Deferred to a future session.  Expected residual gain: 2-4% wall.
+The 151-entry strcmp chain inside `svg_ps_exec_op` (z53.c ~2645-4150)
+was the largest single remaining strcmp cluster.  Now an FNV-1a +
+open-addressed-linear-probing 256-slot table (same pattern as
+`svg_dict_lookup`), built lazily on first call from a static seed
+table of ~175 (name, op_id) pairs (155 unique op names + 20 @Graph
+plot-symbol names), feeding a single `switch (op_id)`.  Aliases
+collapse where the body did not need to discriminate
+(`setrgbcolor`/`LoutSetRGBColor`, `fill`/`eofill`,
+`userdict`/`systemdict`/`globaldict`/`errordict`/`statusdict`/`$error`,
+`save_cp`/`restore_cp`, `setlinecap`/`setlinejoin`/`setmiterlimit`,
+`currentmatrix`/`defaultmatrix`); pairs that needed to discriminate
+(`arc`/`arcn`, `transform`/`dtransform`, `itransform`/`idtransform`,
+`matrix`/`identmatrix`, `clip`/`showpage`, `eq`/`ne`,
+`lt`/`gt`/`le`/`ge`, `and`/`or`/`xor`) keep distinct op_ids and
+dispatch on op_id inside the case.  The 20 @Graph plot-symbol names
+route to a new helper `svg_ps_exec_symbol`.
+
+Realised gain on the User's Guide build was substantially larger than
+the 2-4% projected here: ~77 s wall / ~40-49 s user before, ~32 s
+wall / ~22 s user after -- 30-45% wall, 40-50% user.  WSL2 noise is
+high but the speedup is consistent across runs.  This closes the
+quick-win list opened by SVG_PERFORMANCE.md's section 4 ranking
+(items #1, #3, #4, #5, #6 all landed).  Next opportunities tracked
+in NEXT_OPTIMIZATIONS.md.
 
 
 SVG is **~1.7x slower wall, ~1.4x slower user** on `-r3`. The 3x figure on

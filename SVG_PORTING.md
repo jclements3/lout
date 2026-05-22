@@ -78,6 +78,45 @@ New state the SVG back-end needs that PS does not:
 
 ## 3. Function-by-function port table
 
+### Status digest (2026-05-21)
+
+All 32 callbacks below are now **implemented** in `z53.c` and exercised by
+the 53-snippet regression suite (`tests/run_all.sh` -> 53 Pass-Excellent,
+0 Fail).  The "Complexity" column below was the porting estimate; the
+table is kept for historical reference and for the few items where the
+SVG strategy still has known gaps (see section 10 "Remaining known
+issues" for the live list).
+
+Recently completed (since the previous SVG_PORTING.md revision):
+
+- `svg_ps_exec_op` strcmp ladder -> FNV-1a + open-addressed hash table
+  feeding a `switch (op_id)` (commit `2a33e3d`, 2026-05-21).  Built
+  lazily from a static seed table of ~175 `(name, op_id)` pairs; aliases
+  (`setrgbcolor`/`LoutSetRGBColor`, `fill`/`eofill`,
+  `userdict`/`systemdict`/`globaldict`/`errordict`/`statusdict`/`$error`,
+  `save_cp`/`restore_cp`, `setlinecap`/`setlinejoin`/`setmiterlimit`,
+  `currentmatrix`/`defaultmatrix`) collapse onto one op_id; pairs that
+  need to discriminate (`arc`/`arcn`, `transform`/`dtransform`,
+  `eq`/`ne`, `lt`/`gt`/`le`/`ge`, `and`/`or`/`xor`, ...) keep distinct
+  op_ids and dispatch on op_id inside the case.  The 20 @Graph plot-
+  symbol names route to a new helper `svg_ps_exec_symbol`.  See
+  SVG_PERFORMANCE.md for the timing impact (~77 s -> ~32 s on the
+  User's Guide build).
+- `SVG_OP_CHARPATH` now lays a per-character axis-aligned bbox
+  (`fs*0.5` wide, `fs*0.8` ascent, `fs*0.2` descent) into the current
+  path and advances the current point to the string's end.  Sufficient
+  for `include/coltex`'s `charpath flattenpath pathbbox` sequence
+  (the only in-tree consumer); real Type1/OTF outline parsing through
+  `z37.c` deferred (see NEXT_OPTIMIZATIONS.md).
+- `show` + font operators -- axis tick labels now render
+  (commit `67f29dd`).
+- `@DocInfo` SVG branch -- now emits nothing instead of stray pdfmark
+  gibberish (commit `63c247a`).
+- @Graph plot-symbol sizing (`cur_gr_loutf` now tracks @Graph's
+  `font { -2p }` argument; pages 248 / 262 fixed, commit `421c0dc`).
+- @Graph axes: tightened `eq`/`ne` so that NUM vs BOOL no longer
+  compares as equal (commit `3e26007`).
+
 All functions taken from `grep -n "^static.*PS_\|^void.*PS_" z49.c`.
 Functions are listed in source order. Line numbers are `z49.c`.
 
@@ -258,6 +297,16 @@ Recommend writing the translator as a new `z53_psinterp.c` companion
 file (sibling header included from `z53.c`), or as a static block
 inside `z53.c`. Estimate: 600-1200 LOC for a workable subset, more
 for full robustness. This is the single biggest item in the port.
+
+**Status (2026-05-21).**  Landed in `z53.c` as a static block: an
+operand stack, a graphics-state stack, a mark-and-sweep-collected dict
+pool, an open-addressed `svg_dict_lookup` hash, and (since commit
+`2a33e3d`) an FNV-1a hashed dispatch table over ~175 built-in op
+names feeding a `switch (op_id)` (`svg_ps_exec_op` at z53.c ~2645-4150).
+The named-value bindings (`xsize`, `ysize`, `xmark`, `ymark`, `loutf`,
+`loutv`, `louts`, `in`, `cm`, `pt`, ...) are seeded by
+`SVG_DefineGraphicNames` / `svg_ps_init_run`.  Total interp footprint:
+~3000 LOC of z53.c.
 
 ### 5.2 PS_PrintGraphicInclude
 
