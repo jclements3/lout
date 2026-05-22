@@ -2342,24 +2342,23 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
     if( g->dasharray[0] != '\0' )
       fprintf(out_fp, " stroke-dasharray=\"%s\"", g->dasharray);
     /* stroke-linecap: 0=butt (SVG default), 1=round, 2=square.  PS and SVG */
-    /* share encodings, but only emit non-default values; the SVG default   */
-    /* matches PS's default so we can omit "butt" entirely.  Same logic for */
-    /* stroke-linejoin: 0=miter (default), 1=round, 2=bevel.                */
+    /* share encodings.  Only emit when the active gstate value differs    */
+    /* from the SVG default -- emitting "butt" / "miter" / "4" on every    */
+    /* stroke not only bloats the output but also subtly perturbs rsvg's   */
+    /* edge antialiasing on small shapes (e.g. the appendix colour-name    */
+    /* swatch grid on User's Guide page 308).  Same logic for join (default */
+    /* 0=miter) and miterlimit (default 4).                                 */
     if(      g->line_cap == 1 ) cap_name = "round";
     else if( g->line_cap == 2 ) cap_name = "square";
-    else if( g->line_cap == 0 ) cap_name = "butt";
     if(      g->line_join == 1 ) join_name = "round";
     else if( g->line_join == 2 ) join_name = "bevel";
-    else if( g->line_join == 0 ) join_name = "miter";
     if( cap_name != NULL )
       fprintf(out_fp, " stroke-linecap=\"%s\"", cap_name);
-    else
-      fputs(" stroke-linecap=\"butt\"", out_fp);
     if( join_name != NULL )
       fprintf(out_fp, " stroke-linejoin=\"%s\"", join_name);
-    else
-      fputs(" stroke-linejoin=\"miter\"", out_fp);
-    if( g->miter_limit > 0.0 )
+    /* miter_limit is "unset" (< 0) by default; only emit when explicitly  */
+    /* set by setmiterlimit AND not equal to the SVG default of 4.         */
+    if( g->miter_limit > 0.0 && g->miter_limit != 4.0 )
       fprintf(out_fp, " stroke-miterlimit=\"%.3f\"", g->miter_limit);
   }
   fputs("/>\n", out_fp);
@@ -5050,6 +5049,38 @@ static void svg_ps_exec_value(svg_ps_state *s, const svg_value *v)
       /* per-buffer: don't drop the whole @Graphic on the floor as the   */
       /* legacy fallback did -- the rest of the operators in the buffer  */
       /* may still translate cleanly.                                      */
+      /*                                                                   */
+      /* Suppress entirely for names that look like Lout-level tag         */
+      /* identifiers rather than PostScript operators.  The @Diag prologue */
+      /* and @Fig macros expand tag references (`A1`, `B1`, `FROM`, `LMID`,*/
+      /* `LFROM`, `LTO`, `XINDENT`, ...) into the @Graphic body via Lout's */
+      /* macro layer; those names never reach the PostScript dict because */
+      /* the binding lives in Lout's symbol table, not in any @Graphic    */
+      /* prologue.  No real PS operator looks like this -- they're all    */
+      /* lowercase or mixed-case (moveto, LoutSetRGBColor) -- so a name   */
+      /* that's all uppercase ASCII letters + digits (and starts with a   */
+      /* letter) is almost certainly a tag-name leak.  Skip both stderr  */
+      /* and the SVG XML comment for those: they're not bugs in the      */
+      /* interpreter, just side-effects of macro expansion.              */
+      {
+        int is_tag_name = 0;
+        if( v->name != NULL && v->name[0] >= 'A' && v->name[0] <= 'Z' )
+        {
+          const char *p;
+          is_tag_name = 1;
+          for( p = v->name; *p != '\0'; p++ )
+          {
+            int ch = (unsigned char) *p;
+            if( !((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) )
+            {
+              is_tag_name = 0;
+              break;
+            }
+          }
+        }
+        if( is_tag_name )
+          break;
+      }
       if( svg_warn_unknown_count < SVG_WARN_MAX )
       {
         svg_warn_unknown_count++;
