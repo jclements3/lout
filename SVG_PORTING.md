@@ -664,3 +664,82 @@ before the fix) and pool_used stays under 20 indefinitely.
   Tick numeric labels are still missing because `show` is still a
   stub in @Graphic context; that is a separate text-emission issue.
   All 30 regression snippets continue to pass.
+
+- **@Sym / @Char Symbol-font glyph gap in SVG output** -- **audited
+  2026-05-21**, **not fixable from the include/ layer**.
+
+  Audit.  Both `bsf`'s `@Sym` (`{Symbol Base} @Font @Char x`, glyph
+  name argument) and `eqf`'s `@Sym` (`{Symbol Base} @Font x`, octal
+  byte argument) ultimately produce a byte that flows through
+  `SVG_PrintWord` -> `svg_emit_word_text` -> Symbol-font LCM lookup
+  (`maps/Symb.LCM`) -> `svg_glyph_to_unicode` (z53.c, line 451).  The
+  current `svg_glyph_table` in z53.c covers Latin-1 (ISO-8859-1) glyph
+  names plus a handful of typographic punctuation, but contains **none
+  of the 138 Symbol-font glyph names** that `Symb.LCM` actually emits.
+
+  Concretely, of the 188 named entries in `Symb.LCM`, 138 fall through
+  to the `cp = c` (raw byte -> Latin-1 -> UTF-8) fallback in
+  `svg_emit_word_text`.  This means `@Sym "alpha"` renders as the
+  Latin letter `a`, `@Sym "minute"` renders as U+00A2 (cent sign),
+  `@Sym "integral"` renders as U+00F2 (`o-with-grave`), etc.
+
+  Missing Symbol-font glyph names include:
+
+  - All Greek lower-case and capital letters (alpha..omega,
+    Alpha..Omega), plus the variant forms `theta1`, `phi1`, `sigma1`,
+    `omega1`, `Upsilon1`
+  - Math operators: `integral`, `integraltp/ex/bt`, `summation`,
+    `product`, `radical`, `radicalex`, `partialdiff`, `gradient`,
+    `dotmath`, `asteriskmath`, `proportional`, `infinity`,
+    `lessequal`, `greaterequal`, `notequal`, `approxequal`,
+    `equivalence`, `congruent`, `similar`, `perpendicular`, `angle`,
+    `therefore`, `existential`, `universal`, `suchthat`
+  - Set operators: `element`, `notelement`, `propersubset`,
+    `propersuperset`, `notsubset`, `reflexsubset`, `reflexsuperset`,
+    `union`, `intersection`, `emptyset`, `aleph`
+  - Logic: `logicaland`, `logicalor`, `logicalnot`
+  - Geometry: `circleplus`, `circlemultiply`, `lozenge`, `weierstrass`
+  - Arrows: `arrowleft/right/up/down`, `arrowboth`, `arrowdblleft`
+    etc., plus the extension pieces `arrowvertex`, `arrowhorizex`,
+    `carriagereturn`
+  - Fences (used by eq for big brackets): `bracketlefttp/ex/bt`,
+    `bracketrighttp/ex/bt`, `parenlefttp/ex/bt`, `parenrighttp/ex/bt`,
+    `bracelefttp/mid/bt`, `bracerighttp/mid/bt`, `braceex`
+  - Suits: `club`, `diamond`, `heart`, `spade`
+  - Misc: `minute`, `second`, `degree`, `Ifraktur`, `Rfraktur`,
+    `angleleft`, `angleright`
+
+  Observation in the User's Guide build (`lout/doc/user/all`):
+  `grep -cE '[<greek-range>]' /tmp/user.svg` -> 0 hits, despite 1182
+  references to `font-family="Symbol"` in the same file.  Every Greek
+  letter and math operator in the User's Guide currently renders
+  silently as the wrong glyph in SVG output.
+
+  Why the include/-layer workaround in the brief does not apply.
+  The task brief proposed switching `@Sym` to emit `@Char "name"`
+  inside `@BackEnd @Case { SVG @Yield { ... } }`.  This was based on
+  the premise that `@Char` would route through a different code path
+  than raw bytes in SVG mode.  It does not: `@Char "alpha"` in Lout's
+  parser resolves to **the same byte** (0x61 with Symbol-font
+  encoding) that `@Sym "\141"` produces, and from `SVG_PrintWord`'s
+  perspective the two are indistinguishable.  Both land at the same
+  `svg_glyph_to_unicode("alpha")` call that returns 0.
+
+  There is no Lout-layer mechanism that bypasses `svg_emit_word_text`
+  for ordinary text runs.  The only passthroughs are `@Graphic` and
+  the PS-prologue paths, neither of which is appropriate for inline
+  symbols inside galleys / equations.
+
+  Conclusion.  The fix must live in `z53.c`: extend `svg_glyph_table`
+  with the full Symbol-font glyph -> Unicode set (and, for full
+  coverage, also the `Ding.LCM` Zapf Dingbats names a1..a999).  A
+  reasonable mapping for the Symbol font is the one in Adobe's
+  `glyphlist.txt` cross-referenced with Unicode's Mathematical
+  Operators (U+2200..U+22FF), Miscellaneous Mathematical Symbols
+  (U+27C0..U+27EF), Arrows (U+2190..U+21FF), and Greek and Coptic
+  (U+0370..U+03FF) blocks.  This is a ~150-entry static-array
+  extension; deferred this round per the no-touch on z53.c.
+
+  Verification this round.  All 53 regression snippets still pass
+  (`tests/run_all.sh` -> 53/0, Pass-Excellent 24/24).  No
+  `include/` files were changed; the audit is documentation-only.
