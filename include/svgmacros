@@ -58,6 +58,35 @@ def @Math right @Body
 
 ###########################################################################
 #                                                                         #
+#   @DMath { LATEX-SOURCE }                                                #
+#                                                                         #
+#   Display-math variant of @Math.  In SVG mode: emits                    #
+#       <foreignObject><span class="math math-display">LATEX-SOURCE      #
+#       </span></foreignObject>                                           #
+#   The extra class lets the client-side JS pass displayMode:true to     #
+#   KaTeX, which uses larger glyphs / scaled fractions for displayed    #
+#   equations.  In any other back-end: plain word block, same as @Math. #
+#                                                                         #
+###########################################################################
+
+def @DMath right @Body
+{
+    @BackEnd @Case {
+        SVG @Yield {
+            { "<foreignObject><span class=" "\"" "math math-display"
+              "\"" ">"
+              @Body
+              "</span></foreignObject>" } @Graphic {}
+        }
+        else @Yield {
+            @Body
+        }
+    }
+}
+
+
+###########################################################################
+#                                                                         #
 #   @ABC { ABC-SOURCE }                                                   #
 #                                                                         #
 #   In SVG mode: emits                                                    #

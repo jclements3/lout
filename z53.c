@@ -2721,56 +2721,293 @@ static void svg_ps_show(svg_ps_state *s, const char *str)
 /*  svg_ps_exec_op - look up `name` as a built-in operator and execute it.   */
 /*  Returns 1 if handled, 0 if not.                                          */
 /*                                                                           */
+/*  Dispatch is done via an open-address FNV-1a hash table built once on    */
+/*  first call, mapping each operator name to a small integer op_id.  A      */
+/*  single `switch (op_id)` then runs the case body.  Aliases that share    */
+/*  the case body (e.g. fill/eofill, setrgbcolor/LoutSetRGBColor) map to    */
+/*  the same op_id; aliases whose body discriminates on the original name   */
+/*  (e.g. arc/arcn) get distinct ids.                                        */
+/*                                                                           */
 /*****************************************************************************/
+
+typedef enum {
+  SVG_OP_NONE = 0,
+  /* drawing ops */
+  SVG_OP_NEWPATH, SVG_OP_MOVETO, SVG_OP_LINETO, SVG_OP_RLINETO, SVG_OP_RMOVETO,
+  SVG_OP_CURVETO, SVG_OP_RCURVETO, SVG_OP_CLOSEPATH,
+  SVG_OP_ARC, SVG_OP_ARCN,
+  SVG_OP_STROKE, SVG_OP_FILL,
+  SVG_OP_SETRGBCOLOR, SVG_OP_SETGRAY, SVG_OP_SETHSBCOLOR, SVG_OP_SETCMYKCOLOR,
+  SVG_OP_SETLINEWIDTH, SVG_OP_SETLINESTYLE, SVG_OP_SETDASH,
+  SVG_OP_GSAVE, SVG_OP_GRESTORE,
+  SVG_OP_TRANSLATE, SVG_OP_SCALE, SVG_OP_ROTATE, SVG_OP_CONCAT,
+  SVG_OP_TRANSFORM, SVG_OP_DTRANSFORM,
+  SVG_OP_ITRANSFORM, SVG_OP_IDTRANSFORM,
+  SVG_OP_MATRIX, SVG_OP_IDENTMATRIX,
+  SVG_OP_CURRENTMATRIX, SVG_OP_SETMATRIX,
+  SVG_OP_CURRENTPOINT,
+  SVG_OP_CLIP, SVG_OP_SHOWPAGE,
+  SVG_OP_SHOW, SVG_OP_STRINGWIDTH, SVG_OP_CHARPATH,
+  SVG_OP_FINDFONT, SVG_OP_SCALEFONT, SVG_OP_SETFONT, SVG_OP_CURRENTFONT,
+  /* @Graph plot symbols (all share a single dispatch helper) */
+  SVG_OP_SYM_FILLEDSQUARE,   SVG_OP_SYM_DOFILLEDSQUARE,
+  SVG_OP_SYM_SQUARE,         SVG_OP_SYM_DOSQUARE,
+  SVG_OP_SYM_FILLEDCIRCLE,   SVG_OP_SYM_DOFILLEDCIRCLE,
+  SVG_OP_SYM_CIRCLE,         SVG_OP_SYM_DOCIRCLE,
+  SVG_OP_SYM_FILLEDDIAMOND,  SVG_OP_SYM_DOFILLEDDIAMOND,
+  SVG_OP_SYM_DIAMOND,        SVG_OP_SYM_DODIAMOND,
+  SVG_OP_SYM_FILLEDTRIANGLE, SVG_OP_SYM_DOFILLEDTRIANGLE,
+  SVG_OP_SYM_TRIANGLE,       SVG_OP_SYM_DOTRIANGLE,
+  SVG_OP_SYM_CROSS,          SVG_OP_SYM_DOCROSS,
+  SVG_OP_SYM_PLUS,           SVG_OP_SYM_DOPLUS,
+  /* Lout named procedures */
+  SVG_OP_LOUTGRAPHIC, SVG_OP_LOUTBOX, SVG_OP_LOUTRULE,
+  SVG_OP_LOUTCURVEBOX, SVG_OP_LOUTSHADOWBOX, SVG_OP_LOUTGR2,
+  SVG_OP_SAVE_CP,
+  SVG_OP_LOUTTEXTURESOLID, SVG_OP_LOUTSETTEXTURE, SVG_OP_LOUTMAKETEXTURE,
+  /* dictionary ops */
+  SVG_OP_DICT, SVG_OP_BEGIN, SVG_OP_END, SVG_OP_CURRENTDICT,
+  SVG_OP_SYSDICT,
+  SVG_OP_DEF, SVG_OP_LOAD, SVG_OP_WHERE, SVG_OP_KNOWN,
+  SVG_OP_EXEC, SVG_OP_BIND, SVG_OP_CVX, SVG_OP_CVLIT,
+  SVG_OP_TYPE, SVG_OP_XCHECK,
+  /* boolean predicates */
+  SVG_OP_TRUE, SVG_OP_FALSE, SVG_OP_NULL,
+  SVG_OP_EQ, SVG_OP_NE,
+  SVG_OP_LT, SVG_OP_GT, SVG_OP_LE, SVG_OP_GE,
+  SVG_OP_AND, SVG_OP_OR, SVG_OP_XOR, SVG_OP_NOT,
+  /* arithmetic */
+  SVG_OP_ADD, SVG_OP_SUB, SVG_OP_MUL, SVG_OP_DIV, SVG_OP_IDIV, SVG_OP_MOD,
+  SVG_OP_NEG, SVG_OP_ABS, SVG_OP_SQRT,
+  SVG_OP_SIN, SVG_OP_COS, SVG_OP_ATAN, SVG_OP_EXP, SVG_OP_LN, SVG_OP_LOG,
+  SVG_OP_TRUNCATE, SVG_OP_FLOOR, SVG_OP_CEILING, SVG_OP_ROUND,
+  SVG_OP_CVI, SVG_OP_CVR, SVG_OP_CVS, SVG_OP_CVN, SVG_OP_STRING,
+  /* stack manipulation */
+  SVG_OP_POP, SVG_OP_DUP, SVG_OP_EXCH, SVG_OP_INDEX, SVG_OP_COPY, SVG_OP_ROLL,
+  SVG_OP_CLEAR, SVG_OP_COUNT, SVG_OP_MARK, SVG_OP_CLEARTOMARK, SVG_OP_COUNTTOMARK,
+  SVG_OP_RBRACKET,
+  /* array/string ops */
+  SVG_OP_ALOAD, SVG_OP_ASTORE, SVG_OP_LENGTH, SVG_OP_GET, SVG_OP_PUT,
+  SVG_OP_PUTINTERVAL, SVG_OP_SEARCH,
+  /* control flow */
+  SVG_OP_IF, SVG_OP_IFELSE, SVG_OP_FOR, SVG_OP_REPEAT, SVG_OP_LOOP, SVG_OP_FORALL,
+  SVG_OP_EXIT, SVG_OP_STOP, SVG_OP_STOPPED,
+  /* Lout numeric prologue helpers */
+  SVG_OP_IN, SVG_OP_CM, SVG_OP_PT, SVG_OP_EM, SVG_OP_SP, SVG_OP_VS, SVG_OP_FT,
+  SVG_OP_DG,
+  SVG_OP__COUNT
+} svg_op_id;
+
+typedef struct {
+  const char  *name;     /* arena-owned (interned via static seed) */
+  unsigned int hash;
+  svg_op_id    op_id;
+} svg_op_hash_entry;
+
+#define SVG_OP_HASH_SIZE 256
+#define SVG_OP_HASH_MASK (SVG_OP_HASH_SIZE - 1)
+
+static svg_op_hash_entry svg_op_hash_table[SVG_OP_HASH_SIZE];
+static int               svg_op_hash_built = 0;
+
+/* (name, op_id) seed table.  Order does not matter for correctness; the      */
+/* hash distributes entries.  Keep aliases that share a case body grouped    */
+/* together for readability.                                                  */
+static const struct { const char *name; svg_op_id id; } svg_op_seed[] = {
+  /* drawing ops */
+  {"newpath", SVG_OP_NEWPATH}, {"moveto", SVG_OP_MOVETO},
+  {"lineto", SVG_OP_LINETO}, {"rlineto", SVG_OP_RLINETO},
+  {"rmoveto", SVG_OP_RMOVETO}, {"curveto", SVG_OP_CURVETO},
+  {"rcurveto", SVG_OP_RCURVETO}, {"closepath", SVG_OP_CLOSEPATH},
+  {"arc", SVG_OP_ARC}, {"arcn", SVG_OP_ARCN},
+  {"stroke", SVG_OP_STROKE}, {"fill", SVG_OP_FILL}, {"eofill", SVG_OP_FILL},
+  {"setrgbcolor", SVG_OP_SETRGBCOLOR}, {"LoutSetRGBColor", SVG_OP_SETRGBCOLOR},
+  {"setgray", SVG_OP_SETGRAY}, {"LoutSetGray", SVG_OP_SETGRAY},
+  {"sethsbcolor", SVG_OP_SETHSBCOLOR}, {"LoutSetHSBColor", SVG_OP_SETHSBCOLOR},
+  {"setcmykcolor", SVG_OP_SETCMYKCOLOR}, {"LoutSetCMYKColor", SVG_OP_SETCMYKCOLOR},
+  {"setlinewidth", SVG_OP_SETLINEWIDTH},
+  {"setlinecap", SVG_OP_SETLINESTYLE}, {"setlinejoin", SVG_OP_SETLINESTYLE},
+  {"setmiterlimit", SVG_OP_SETLINESTYLE},
+  {"setdash", SVG_OP_SETDASH},
+  {"gsave", SVG_OP_GSAVE}, {"grestore", SVG_OP_GRESTORE},
+  {"translate", SVG_OP_TRANSLATE}, {"scale", SVG_OP_SCALE},
+  {"rotate", SVG_OP_ROTATE}, {"concat", SVG_OP_CONCAT},
+  {"transform", SVG_OP_TRANSFORM}, {"dtransform", SVG_OP_DTRANSFORM},
+  {"itransform", SVG_OP_ITRANSFORM}, {"idtransform", SVG_OP_IDTRANSFORM},
+  {"matrix", SVG_OP_MATRIX}, {"identmatrix", SVG_OP_IDENTMATRIX},
+  {"currentmatrix", SVG_OP_CURRENTMATRIX}, {"defaultmatrix", SVG_OP_CURRENTMATRIX},
+  {"setmatrix", SVG_OP_SETMATRIX},
+  {"currentpoint", SVG_OP_CURRENTPOINT},
+  {"clip", SVG_OP_CLIP}, {"showpage", SVG_OP_SHOWPAGE},
+  {"show", SVG_OP_SHOW}, {"stringwidth", SVG_OP_STRINGWIDTH},
+  {"charpath", SVG_OP_CHARPATH},
+  {"findfont", SVG_OP_FINDFONT}, {"scalefont", SVG_OP_SCALEFONT},
+  {"setfont", SVG_OP_SETFONT}, {"currentfont", SVG_OP_CURRENTFONT},
+  /* @Graph plot symbols */
+  {"filledsquare",     SVG_OP_SYM_FILLEDSQUARE},
+  {"dofilledsquare",   SVG_OP_SYM_DOFILLEDSQUARE},
+  {"square",           SVG_OP_SYM_SQUARE},
+  {"dosquare",         SVG_OP_SYM_DOSQUARE},
+  {"filledcircle",     SVG_OP_SYM_FILLEDCIRCLE},
+  {"dofilledcircle",   SVG_OP_SYM_DOFILLEDCIRCLE},
+  {"circle",           SVG_OP_SYM_CIRCLE},
+  {"docircle",         SVG_OP_SYM_DOCIRCLE},
+  {"filleddiamond",    SVG_OP_SYM_FILLEDDIAMOND},
+  {"dofilleddiamond",  SVG_OP_SYM_DOFILLEDDIAMOND},
+  {"diamond",          SVG_OP_SYM_DIAMOND},
+  {"dodiamond",        SVG_OP_SYM_DODIAMOND},
+  {"filledtriangle",   SVG_OP_SYM_FILLEDTRIANGLE},
+  {"dofilledtriangle", SVG_OP_SYM_DOFILLEDTRIANGLE},
+  {"triangle",         SVG_OP_SYM_TRIANGLE},
+  {"dotriangle",       SVG_OP_SYM_DOTRIANGLE},
+  {"cross",            SVG_OP_SYM_CROSS},
+  {"docross",          SVG_OP_SYM_DOCROSS},
+  {"plus",             SVG_OP_SYM_PLUS},
+  {"doplus",           SVG_OP_SYM_DOPLUS},
+  /* Lout named procedures */
+  {"LoutGraphic", SVG_OP_LOUTGRAPHIC}, {"LoutBox", SVG_OP_LOUTBOX},
+  {"LoutRule", SVG_OP_LOUTRULE}, {"LoutCurveBox", SVG_OP_LOUTCURVEBOX},
+  {"LoutShadowBox", SVG_OP_LOUTSHADOWBOX}, {"LoutGr2", SVG_OP_LOUTGR2},
+  {"save_cp", SVG_OP_SAVE_CP}, {"restore_cp", SVG_OP_SAVE_CP},
+  {"LoutTextureSolid", SVG_OP_LOUTTEXTURESOLID},
+  {"LoutSetTexture", SVG_OP_LOUTSETTEXTURE},
+  {"LoutMakeTexture", SVG_OP_LOUTMAKETEXTURE},
+  /* dictionary ops */
+  {"dict", SVG_OP_DICT}, {"begin", SVG_OP_BEGIN}, {"end", SVG_OP_END},
+  {"currentdict", SVG_OP_CURRENTDICT},
+  {"userdict", SVG_OP_SYSDICT}, {"systemdict", SVG_OP_SYSDICT},
+  {"globaldict", SVG_OP_SYSDICT}, {"errordict", SVG_OP_SYSDICT},
+  {"statusdict", SVG_OP_SYSDICT}, {"$error", SVG_OP_SYSDICT},
+  {"def", SVG_OP_DEF}, {"load", SVG_OP_LOAD}, {"where", SVG_OP_WHERE},
+  {"known", SVG_OP_KNOWN}, {"exec", SVG_OP_EXEC}, {"bind", SVG_OP_BIND},
+  {"cvx", SVG_OP_CVX}, {"cvlit", SVG_OP_CVLIT},
+  {"type", SVG_OP_TYPE}, {"xcheck", SVG_OP_XCHECK},
+  /* boolean predicates */
+  {"true", SVG_OP_TRUE}, {"false", SVG_OP_FALSE}, {"null", SVG_OP_NULL},
+  {"eq", SVG_OP_EQ}, {"ne", SVG_OP_NE},
+  {"lt", SVG_OP_LT}, {"gt", SVG_OP_GT}, {"le", SVG_OP_LE}, {"ge", SVG_OP_GE},
+  {"and", SVG_OP_AND}, {"or", SVG_OP_OR}, {"xor", SVG_OP_XOR},
+  {"not", SVG_OP_NOT},
+  /* arithmetic */
+  {"add", SVG_OP_ADD}, {"sub", SVG_OP_SUB}, {"mul", SVG_OP_MUL},
+  {"div", SVG_OP_DIV}, {"idiv", SVG_OP_IDIV}, {"mod", SVG_OP_MOD},
+  {"neg", SVG_OP_NEG}, {"abs", SVG_OP_ABS}, {"sqrt", SVG_OP_SQRT},
+  {"sin", SVG_OP_SIN}, {"cos", SVG_OP_COS}, {"atan", SVG_OP_ATAN},
+  {"exp", SVG_OP_EXP}, {"ln", SVG_OP_LN}, {"log", SVG_OP_LOG},
+  {"truncate", SVG_OP_TRUNCATE}, {"floor", SVG_OP_FLOOR},
+  {"ceiling", SVG_OP_CEILING}, {"round", SVG_OP_ROUND},
+  {"cvi", SVG_OP_CVI}, {"cvr", SVG_OP_CVR},
+  {"cvs", SVG_OP_CVS}, {"cvn", SVG_OP_CVN}, {"string", SVG_OP_STRING},
+  /* stack manipulation */
+  {"pop", SVG_OP_POP}, {"dup", SVG_OP_DUP}, {"exch", SVG_OP_EXCH},
+  {"index", SVG_OP_INDEX}, {"copy", SVG_OP_COPY}, {"roll", SVG_OP_ROLL},
+  {"clear", SVG_OP_CLEAR}, {"count", SVG_OP_COUNT},
+  {"mark", SVG_OP_MARK}, {"cleartomark", SVG_OP_CLEARTOMARK},
+  {"counttomark", SVG_OP_COUNTTOMARK},
+  {"]", SVG_OP_RBRACKET},
+  /* array/string ops */
+  {"aload", SVG_OP_ALOAD}, {"astore", SVG_OP_ASTORE},
+  {"length", SVG_OP_LENGTH}, {"get", SVG_OP_GET}, {"put", SVG_OP_PUT},
+  {"putinterval", SVG_OP_PUTINTERVAL}, {"search", SVG_OP_SEARCH},
+  /* control flow */
+  {"if", SVG_OP_IF}, {"ifelse", SVG_OP_IFELSE},
+  {"for", SVG_OP_FOR}, {"repeat", SVG_OP_REPEAT}, {"loop", SVG_OP_LOOP},
+  {"forall", SVG_OP_FORALL},
+  {"exit", SVG_OP_EXIT}, {"stop", SVG_OP_STOP}, {"stopped", SVG_OP_STOPPED},
+  /* Lout numeric helpers */
+  {"in", SVG_OP_IN}, {"cm", SVG_OP_CM}, {"pt", SVG_OP_PT}, {"em", SVG_OP_EM},
+  {"sp", SVG_OP_SP}, {"vs", SVG_OP_VS}, {"ft", SVG_OP_FT}, {"dg", SVG_OP_DG},
+  {NULL, SVG_OP_NONE}
+};
+
+/* Populate svg_op_hash_table from svg_op_seed.  Uses the same FNV-1a +     */
+/* open-addressed linear probing as svg_dict_lookup.  Called lazily on the */
+/* first svg_ps_exec_op invocation.                                        */
+static void svg_op_hash_build(void)
+{
+  int i;
+  unsigned int h, slot;
+  for( i = 0; i < SVG_OP_HASH_SIZE; i++ )
+  {
+    svg_op_hash_table[i].name  = NULL;
+    svg_op_hash_table[i].hash  = 0;
+    svg_op_hash_table[i].op_id = SVG_OP_NONE;
+  }
+  for( i = 0; svg_op_seed[i].name != NULL; i++ )
+  {
+    h = svg_name_hash(svg_op_seed[i].name);
+    slot = h & (unsigned int) SVG_OP_HASH_MASK;
+    while( svg_op_hash_table[slot].name != NULL )
+      slot = (slot + 1) & (unsigned int) SVG_OP_HASH_MASK;
+    svg_op_hash_table[slot].name  = svg_op_seed[i].name;
+    svg_op_hash_table[slot].hash  = h;
+    svg_op_hash_table[slot].op_id = svg_op_seed[i].id;
+  }
+  svg_op_hash_built = 1;
+}
+
+/* Look up `name` in the op-hash; return SVG_OP_NONE if not present.  Hot   */
+/* path: one FNV-1a pass + (usually 1) probe + one strcmp.                  */
+static svg_op_id svg_op_lookup(const char *name)
+{
+  unsigned int h, slot;
+  svg_op_hash_entry *e;
+  if( !svg_op_hash_built ) svg_op_hash_build();
+  h = svg_name_hash(name);
+  slot = h & (unsigned int) SVG_OP_HASH_MASK;
+  while( (e = &svg_op_hash_table[slot])->name != NULL )
+  {
+    if( e->hash == h && strcmp(e->name, name) == 0 )
+      return e->op_id;
+    slot = (slot + 1) & (unsigned int) SVG_OP_HASH_MASK;
+  }
+  return SVG_OP_NONE;
+}
+
+/* Forward declaration of the @Graph plot-symbol helper, defined below.     */
+static int svg_ps_exec_symbol(svg_ps_state *s, const char *name,
+  svg_op_id op_id);
 
 static int svg_ps_exec_op(svg_ps_state *s, const char *name)
 {
   double a, b, c, d, e, f;
   svg_value va, vb;
+  svg_op_id op_id = svg_op_lookup(name);
+  if( op_id == SVG_OP_NONE ) return 0;
+  switch( op_id )
+  {
 
   /* drawing ops */
-  if( strcmp(name, "newpath") == 0 )
-  {
+  case SVG_OP_NEWPATH:
     s->path[0] = '\0';
     s->plen = 0;
     s->had_geom = FALSE;
     s->have_cp = FALSE;
     s->last_pt_valid = FALSE;
     return 1;
-  }
-  if( strcmp(name, "moveto") == 0 )
-  {
+  case SVG_OP_MOVETO:
     b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_moveto(s, a, b);
     return 1;
-  }
-  if( strcmp(name, "lineto") == 0 )
-  {
+  case SVG_OP_LINETO:
     b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_lineto(s, a, b);
     return 1;
-  }
-  if( strcmp(name, "rlineto") == 0 )
-  {
+  case SVG_OP_RLINETO:
     b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_lineto(s, s->cur_x + a, s->cur_y + b);
     return 1;
-  }
-  if( strcmp(name, "rmoveto") == 0 )
-  {
+  case SVG_OP_RMOVETO:
     b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_moveto(s, s->cur_x + a, s->cur_y + b);
     return 1;
-  }
-  if( strcmp(name, "curveto") == 0 )
-  {
+  case SVG_OP_CURVETO:
     f = svg_ps_pop(s); e = svg_ps_pop(s);
     d = svg_ps_pop(s); c = svg_ps_pop(s);
     b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_curveto(s, a, b, c, d, e, f);
     return 1;
-  }
-  if( strcmp(name, "rcurveto") == 0 )
+  case SVG_OP_RCURVETO:
   {
     double cx, cy;
     f = svg_ps_pop(s); e = svg_ps_pop(s);
@@ -2780,48 +3017,37 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_curveto(s, cx + a, cy + b, cx + c, cy + d, cx + e, cy + f);
     return 1;
   }
-  if( strcmp(name, "closepath") == 0 )
-  {
+  case SVG_OP_CLOSEPATH:
     svg_ps_closepath(s);
     return 1;
-  }
-  if( strcmp(name, "arc") == 0 || strcmp(name, "arcn") == 0 )
+  case SVG_OP_ARC:
+  case SVG_OP_ARCN:
   {
     double cx, cy, r, a1, a2;
     a2 = svg_ps_pop(s); a1 = svg_ps_pop(s);
     r  = svg_ps_pop(s);
     cy = svg_ps_pop(s); cx = svg_ps_pop(s);
-    svg_ps_arc(s, cx, cy, r, a1, a2, strcmp(name, "arc") == 0 ? 1 : 0);
+    svg_ps_arc(s, cx, cy, r, a1, a2, op_id == SVG_OP_ARC ? 1 : 0);
     return 1;
   }
-  if( strcmp(name, "stroke") == 0 )
-  {
+  case SVG_OP_STROKE:
     svg_ps_emit_path(s, 1, 0);
     return 1;
-  }
-  if( strcmp(name, "fill") == 0 || strcmp(name, "eofill") == 0 )
-  {
+  case SVG_OP_FILL:
     svg_ps_emit_path(s, 0, 1);
     return 1;
-  }
-  if( strcmp(name, "setrgbcolor") == 0 || strcmp(name, "LoutSetRGBColor") == 0 )
-  {
+  case SVG_OP_SETRGBCOLOR:
     c = svg_ps_pop(s); b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_set_rgb(s, a, b, c);
     return 1;
-  }
-  if( strcmp(name, "setgray") == 0 || strcmp(name, "LoutSetGray") == 0 )
-  {
+  case SVG_OP_SETGRAY:
     a = svg_ps_pop(s);
     svg_ps_set_rgb(s, a, a, a);
     return 1;
-  }
-  if( strcmp(name, "sethsbcolor") == 0 || strcmp(name, "LoutSetHSBColor") == 0 )
-  {
+  case SVG_OP_SETHSBCOLOR:
     (void) svg_ps_pop(s); (void) svg_ps_pop(s); (void) svg_ps_pop(s);
     return 1;
-  }
-  if( strcmp(name, "setcmykcolor") == 0 || strcmp(name, "LoutSetCMYKColor") == 0 )
+  case SVG_OP_SETCMYKCOLOR:
   {
     double cc, mm, yy, kk;
     kk = svg_ps_pop(s); yy = svg_ps_pop(s);
@@ -2832,20 +3058,14 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       (1.0 - yy) * (1.0 - kk));
     return 1;
   }
-  if( strcmp(name, "setlinewidth") == 0 )
-  {
+  case SVG_OP_SETLINEWIDTH:
     a = svg_ps_pop(s);
     s->gs[s->gs_top].line_width = a / (double) PT;
     return 1;
-  }
-  if( strcmp(name, "setlinecap") == 0 ||
-      strcmp(name, "setlinejoin") == 0 ||
-      strcmp(name, "setmiterlimit") == 0 )
-  {
+  case SVG_OP_SETLINESTYLE:
     (void) svg_ps_pop(s);
     return 1;
-  }
-  if( strcmp(name, "setdash") == 0 )
+  case SVG_OP_SETDASH:
   {
     /* arg layout: <array> <offset> setdash */
     int i;
@@ -2883,21 +3103,17 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "gsave") == 0 )
-  {
+  case SVG_OP_GSAVE:
     if( s->gs_top + 1 < SVG_PS_GS_DEPTH )
     {
       s->gs[s->gs_top + 1] = s->gs[s->gs_top];
       s->gs_top++;
     }
     return 1;
-  }
-  if( strcmp(name, "grestore") == 0 )
-  {
+  case SVG_OP_GRESTORE:
     if( s->gs_top > 0 ) s->gs_top--;
     return 1;
-  }
-  if( strcmp(name, "translate") == 0 )
+  case SVG_OP_TRANSLATE:
   {
     /* Optional matrix variant: tx ty matrix translate -> matrix             */
     /* Plain variant:           tx ty translate         -> updates CTM       */
@@ -2922,7 +3138,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "scale") == 0 )
+  case SVG_OP_SCALE:
   {
     double sx, sy;
     if( s->top > 0 && s->stack[s->top - 1].kind == SVG_VK_ARRAY )
@@ -2944,7 +3160,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "rotate") == 0 )
+  case SVG_OP_ROTATE:
   {
     double ang;
     if( s->top > 0 && s->stack[s->top - 1].kind == SVG_VK_ARRAY )
@@ -2969,7 +3185,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "concat") == 0 )
+  case SVG_OP_CONCAT:
   {
     /* matrix concat -> pre-concat into CTM                                  */
     svg_value vm = svg_ps_pop_value(s);
@@ -2983,7 +3199,8 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "transform") == 0 || strcmp(name, "dtransform") == 0 )
+  case SVG_OP_TRANSFORM:
+  case SVG_OP_DTRANSFORM:
   {
     /* "x y transform"        -> xd yd using CTM                              */
     /* "x y matrix transform" -> xd yd using supplied matrix                  */
@@ -2992,7 +3209,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     double x, y, xd, yd;
     double mtmp[6];
     const double *m_use;
-    int dtrans = (strcmp(name, "dtransform") == 0);
+    int dtrans = (op_id == SVG_OP_DTRANSFORM);
     int i;
     svg_value vm;
     if( s->top > 0 && s->stack[s->top - 1].kind == SVG_VK_ARRAY )
@@ -3023,12 +3240,13 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push_num(s, yd);
     return 1;
   }
-  if( strcmp(name, "itransform") == 0 || strcmp(name, "idtransform") == 0 )
+  case SVG_OP_ITRANSFORM:
+  case SVG_OP_IDTRANSFORM:
   {
     double xd, yd, x, y;
     double mtmp[6];
     const double *m_use;
-    int dtrans = (strcmp(name, "idtransform") == 0);
+    int dtrans = (op_id == SVG_OP_IDTRANSFORM);
     int ok, i;
     svg_value vm;
     double det;
@@ -3068,11 +3286,12 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push_num(s, y);
     return 1;
   }
-  if( strcmp(name, "matrix") == 0 || strcmp(name, "identmatrix") == 0 )
+  case SVG_OP_MATRIX:
+  case SVG_OP_IDENTMATRIX:
   {
     /* matrix     : push identity 6-element matrix array                     */
     /* identmatrix: pop array, fill with identity, push back                 */
-    if( strcmp(name, "identmatrix") == 0 )
+    if( op_id == SVG_OP_IDENTMATRIX )
     {
       svg_value vm = svg_ps_pop_value(s);
       if( vm.kind == SVG_VK_ARRAY && vm.nitems == 6 && vm.items != NULL )
@@ -3090,7 +3309,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "currentmatrix") == 0 || strcmp(name, "defaultmatrix") == 0 )
+  case SVG_OP_CURRENTMATRIX:
   {
     /* expects an array on the stack; fills it with the CTM and returns it.  */
     svg_value vm = svg_ps_pop_value(s);
@@ -3109,7 +3328,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "setmatrix") == 0 )
+  case SVG_OP_SETMATRIX:
   {
     /* matrix setmatrix -> overwrite CTM                                     */
     svg_value vm = svg_ps_pop_value(s);
@@ -3122,25 +3341,22 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "currentpoint") == 0 )
-  {
+  case SVG_OP_CURRENTPOINT:
     svg_ps_push_num(s, s->cur_x);
     svg_ps_push_num(s, s->cur_y);
     return 1;
-  }
-  if( strcmp(name, "clip") == 0 || strcmp(name, "showpage") == 0 )
-  {
+  case SVG_OP_CLIP:
+  case SVG_OP_SHOWPAGE:
     /* Clipping with an empty current path masks all subsequent drawing in   */
     /* this gstate (and its gsave-descendants) until the matching grestore. */
     /* The @Diag prologue uses `newpath clip gsave` to suppress unwanted    */
     /* arrowhead nodes (e.g. the back-arrowhead when only forward is        */
     /* requested).  Honour this by flagging the current gstate; the path-  */
     /* emit primitive then drops paths drawn while the flag is set.        */
-    if( strcmp(name, "clip") == 0 && !s->had_geom )
+    if( op_id == SVG_OP_CLIP && !s->had_geom )
       s->gs[s->gs_top].clip_empty = 1;
     return 1;
-  }
-  if( strcmp(name, "show") == 0 )
+  case SVG_OP_SHOW:
   {
     /* <string> show -- render at the current point in the active font.    */
     svg_value v = svg_ps_pop_value(s);
@@ -3148,7 +3364,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       svg_ps_show(s, v.name);
     return 1;
   }
-  if( strcmp(name, "stringwidth") == 0 )
+  case SVG_OP_STRINGWIDTH:
   {
     /* Fixed-pitch approximation: width = strlen * (font_size * 0.5).      */
     /* Adequate for the few prologue paths (e.g. expstringshow's centring) */
@@ -3161,16 +3377,48 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push_num(s, 0.0);
     return 1;
   }
-  if( strcmp(name, "charpath") == 0 )
+  case SVG_OP_CHARPATH:
   {
-    /* <string> <bool> charpath -- approximate the string's outline.       */
-    /* No-op cleanly: drop both operands.  Outline-as-path is too costly   */
-    /* to implement here; the prologues that use this fall back gracefully. */
-    (void) svg_ps_pop_value(s);  /* bool */
-    (void) svg_ps_pop_value(s);  /* string */
+    /* <string> <bool> charpath -- append the string's outline to the      */
+    /* current path so a subsequent fill/stroke renders text as paths.     */
+    /* Approximate: one axis-aligned bounding-box rectangle per character, */
+    /* using the same 0.5 em fixed-pitch advancement that svg_ps_show /    */
+    /* stringwidth use elsewhere in this back end (font-metric matching at */
+    /* the rasteriser is documented out-of-scope -- see NEXT_OPTIMIZATIONS */
+    /* "Not included").  Real Type 1 glyph outlines would require parsing  */
+    /* the AFM/OTF tables; the bbox fallback is enough for the @Diag /     */
+    /* @Graph prologue paths that use charpath as a hit-test region.       */
+    svg_value vb_local = svg_ps_pop_value(s);  /* bool (true=stroke flag) */
+    svg_value vs_local = svg_ps_pop_value(s);  /* string                  */
+    double fs = s->gs[s->gs_top].font_size;
+    double adv = fs * 0.5;           /* per-char advance, matches show()  */
+    double asc = fs * 0.8;           /* ascent above baseline, approx     */
+    double desc = fs * 0.2;          /* descent below baseline, approx    */
+    double x0 = s->cur_x;
+    double y0 = s->cur_y;
+    int i, n;
+    (void) vb_local;
+    if( vs_local.kind == SVG_VK_STRING && vs_local.name != NULL )
+    {
+      n = (int) strlen(vs_local.name);
+      for( i = 0; i < n; i++ )
+      {
+        double cx = x0 + (double) i * adv;
+        /* rectangle subpath: left-bottom, right-bottom, right-top,        */
+        /* left-top, closepath.  Lays out a clean approximate outline.    */
+        svg_ps_moveto(s, cx,         y0 - desc);
+        svg_ps_lineto(s, cx + adv,   y0 - desc);
+        svg_ps_lineto(s, cx + adv,   y0 + asc);
+        svg_ps_lineto(s, cx,         y0 + asc);
+        svg_ps_closepath(s);
+      }
+      /* Advance the current point past the string (PS charpath leaves   */
+      /* the CP at the end of the last glyph, mirroring show).            */
+      svg_ps_moveto(s, x0 + (double) n * adv, y0);
+    }
     return 1;
   }
-  if( strcmp(name, "findfont") == 0 )
+  case SVG_OP_FINDFONT:
   {
     /* <name> findfont -- record name as the active font and push a dict.  */
     svg_value v = svg_ps_pop_value(s);
@@ -3196,7 +3444,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "scalefont") == 0 )
+  case SVG_OP_SCALEFONT:
   {
     /* <fontdict> <scalar> scalefont <fontdict'> -- record scalar as size. */
     double sz = svg_ps_pop(s);
@@ -3204,14 +3452,12 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     s->gs[s->gs_top].font_size = sz;
     return 1;
   }
-  if( strcmp(name, "setfont") == 0 )
-  {
+  case SVG_OP_SETFONT:
     /* <fontdict> setfont -- consumes the dict.  The gstate already        */
     /* carries the active font name/size set by findfont/scalefont.        */
     (void) svg_ps_pop_value(s);
     return 1;
-  }
-  if( strcmp(name, "currentfont") == 0 )
+  case SVG_OP_CURRENTFONT:
   {
     /* Push a stub font-dict value.  Used by `gsave currentfont 0.7        */
     /* scalefont setfont ... grestore` in graphf's exponent rendering --   */
@@ -3227,193 +3473,21 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     return 1;
   }
 
-  /* @Graph plot-symbol prologue procs.  These are defined inside           */
-  /* lgraphdict in graphf.lpg, but the mini PS interpreter's dict-lookup    */
-  /* path mis-handles the `symbolsize`/`symbollinewidth` def + lookup       */
-  /* sequence that runs inside rundata's `for` loop (the value of `ss`     */
-  /* drifts upward each iteration, producing the page-sized blob symptom   */
-  /* on user's-guide page 248).  Bypass the dict procs entirely and draw   */
-  /* a fixed-size symbol path centred at (xcurr, ycurr) directly.  The     */
-  /* "do<shape>" variants take stack args (x y symbolsize symbollinewidth) */
-  /* and are the natural place to draw; the bare names (filledsquare,     */
-  /* etc.) look up xcurr/ycurr/symbolsize/symbollinewidth from the dict    */
-  /* and transform via trpoint -- so they reduce to "look up the four     */
-  /* values, transform, then drop into the do<shape> handler".            */
-  {
-    static const char *names[] = {
-      "filledsquare", "dofilledsquare", "square", "dosquare",
-      "filledcircle", "dofilledcircle", "circle", "docircle",
-      "filleddiamond", "dofilleddiamond", "diamond", "dodiamond",
-      "filledtriangle", "dofilledtriangle", "triangle", "dotriangle",
-      "cross", "docross", "plus", "doplus", NULL
-    };
-    int is_symbol = 0;
-    int i;
-    for( i = 0; names[i] != NULL; i++ )
-      if( strcmp(name, names[i]) == 0 ) { is_symbol = 1; break; }
-    if( is_symbol )
-    {
-      double slw, ss, yc, xc;
-      int is_do = (strncmp(name, "do", 2) == 0);
-      int outline = 0;
-      const char *shape;
-      /* All graphf.lpg symbols use an "open" form (square, circle, ...)    */
-      /* drawn as an outline stroke, and a "filled" form (filledsquare,    */
-      /* ...) drawn as a solid fill.  cross/plus are stroked single-line  */
-      /* glyphs in both forms (no fill).                                  */
-      shape = is_do ? name + 2 : name;
-      if( strcmp(shape, "square") == 0 || strcmp(shape, "diamond") == 0 ||
-          strcmp(shape, "circle") == 0 || strcmp(shape, "triangle") == 0 )
-        outline = 1;
-      if( !is_do )
-      {
-        /* No-arg wrapper: pull xcurr/ycurr/symbolsize/symbollinewidth     */
-        /* from the dict stack, transform (xcurr, ycurr) via the same     */
-        /* axis-mapping that trpoint does.  Fall back to (0, 0) and a    */
-        /* sensible default size if any lookup fails, so we degrade        */
-        /* gracefully rather than blowing up the page.                    */
-        svg_value vv;
-        double xcur = 0.0, ycur = 0.0;
-        if( svg_dict_stack_lookup("xcurr", &vv) && vv.kind == SVG_VK_NUM )
-          xcur = vv.num;
-        if( svg_dict_stack_lookup("ycurr", &vv) && vv.kind == SVG_VK_NUM )
-          ycur = vv.num;
-        ss = 0.15 * svg_var_loutf;
-        if( svg_dict_stack_lookup("symbolsize", &vv) && vv.kind == SVG_VK_NUM )
-          ss = vv.num;
-        slw = 0.5;
-        if( svg_dict_stack_lookup("symbollinewidth", &vv) && vv.kind == SVG_VK_NUM )
-          slw = vv.num;
-        /* trpoint: map data-space (xcur, ycur) -> graphic-space (xc, yc). */
-        /* Implemented by inlining the relevant graphf.lpg arithmetic       */
-        /* using dict-bound axis variables.  All of these are simple        */
-        /* numerics defined by xset / yset; if they're missing we leave    */
-        /* the point un-transformed, which still beats a 5x-size blob.     */
-        {
-          double trxmin = 0, trxmax = 1, trymin = 0, trymax = 1;
-          double xwidth = 0, ywidth = 0, xextra = 0, yextra = 0;
-          double xdecr = 0, ydecr = 0;
-          double xlog = 0, ylog = 0;
-          if( svg_dict_stack_lookup("trxmin", &vv) && vv.kind == SVG_VK_NUM )
-            trxmin = vv.num;
-          if( svg_dict_stack_lookup("trxmax", &vv) && vv.kind == SVG_VK_NUM )
-            trxmax = vv.num;
-          if( svg_dict_stack_lookup("trymin", &vv) && vv.kind == SVG_VK_NUM )
-            trymin = vv.num;
-          if( svg_dict_stack_lookup("trymax", &vv) && vv.kind == SVG_VK_NUM )
-            trymax = vv.num;
-          if( svg_dict_stack_lookup("xwidth", &vv) && vv.kind == SVG_VK_NUM )
-            xwidth = vv.num;
-          if( svg_dict_stack_lookup("ywidth", &vv) && vv.kind == SVG_VK_NUM )
-            ywidth = vv.num;
-          if( svg_dict_stack_lookup("xextra", &vv) && vv.kind == SVG_VK_NUM )
-            xextra = vv.num;
-          if( svg_dict_stack_lookup("yextra", &vv) && vv.kind == SVG_VK_NUM )
-            yextra = vv.num;
-          /* xdecr/ydecr: graphf.lpg's xset/yset bind these from a boolean    */
-          /* argument via `/xdecr exch def`, so the dict entry has kind BOOL  */
-          /* (vv.num == 1.0 for true, 0.0 for false), not NUM.  Accept both   */
-          /* so the symbol position tracks descending-axis graphs the same    */
-          /* way the curve does.                                              */
-          if( svg_dict_stack_lookup("xdecr", &vv) &&
-              (vv.kind == SVG_VK_NUM || vv.kind == SVG_VK_BOOL) )
-            xdecr = vv.num;
-          if( svg_dict_stack_lookup("ydecr", &vv) &&
-              (vv.kind == SVG_VK_NUM || vv.kind == SVG_VK_BOOL) )
-            ydecr = vv.num;
-          if( svg_dict_stack_lookup("xlog", &vv) && vv.kind == SVG_VK_NUM )
-            xlog = vv.num;
-          if( svg_dict_stack_lookup("ylog", &vv) && vv.kind == SVG_VK_NUM )
-            ylog = vv.num;
-          if( xlog > 1 && xcur > 0 ) xcur = log(xcur) / log(xlog);
-          if( ylog > 1 && ycur > 0 ) ycur = log(ycur) / log(ylog);
-          if( trxmax - trxmin != 0.0 )
-            xc = (xdecr != 0.0 ? (trxmax - xcur) : (xcur - trxmin))
-                 / (trxmax - trxmin) * xwidth + xextra;
-          else
-            xc = xextra;
-          if( trymax - trymin != 0.0 )
-            yc = (ydecr != 0.0 ? (trymax - ycur) : (ycur - trymin))
-                 / (trymax - trymin) * ywidth + yextra;
-          else
-            yc = yextra;
-        }
-      }
-      else
-      {
-        /* do<shape>: 4-arg form, stack has x y symbolsize symbollinewidth. */
-        slw = svg_ps_pop(s);
-        ss  = svg_ps_pop(s);
-        yc  = svg_ps_pop(s);
-        xc  = svg_ps_pop(s);
-      }
-      if( strcmp(shape, "square") == 0 )
-      {
-        double half = outline ? (ss - slw * 0.5) : ss;
-        if( half < 0.0 ) half = 0.0;
-        svg_ps_moveto(s, xc - half, yc - half);
-        svg_ps_lineto(s, xc + half, yc - half);
-        svg_ps_lineto(s, xc + half, yc + half);
-        svg_ps_lineto(s, xc - half, yc + half);
-        svg_ps_closepath(s);
-        svg_ps_emit_path(s, outline, !outline);
-      }
-      else if( strcmp(shape, "circle") == 0 )
-      {
-        double r = outline ? (ss - slw * 0.5) : ss;
-        if( r < 0.0 ) r = 0.0;
-        svg_ps_moveto(s, xc + r, yc);
-        svg_ps_arc(s, xc, yc, r, 0.0, 180.0, 1);
-        svg_ps_arc(s, xc, yc, r, 180.0, 360.0, 1);
-        svg_ps_closepath(s);
-        svg_ps_emit_path(s, outline, !outline);
-      }
-      else if( strcmp(shape, "diamond") == 0 )
-      {
-        double half = outline ? (ss - slw * 0.5) : ss;
-        if( half < 0.0 ) half = 0.0;
-        svg_ps_moveto(s, xc - half, yc);
-        svg_ps_lineto(s, xc, yc - half);
-        svg_ps_lineto(s, xc + half, yc);
-        svg_ps_lineto(s, xc, yc + half);
-        svg_ps_closepath(s);
-        svg_ps_emit_path(s, outline, !outline);
-      }
-      else if( strcmp(shape, "triangle") == 0 )
-      {
-        double h = outline ? (ss - slw * 0.5) : ss;
-        if( h < 0.0 ) h = 0.0;
-        svg_ps_moveto(s, xc, yc + h * 1.5);
-        svg_ps_lineto(s, xc - h, yc - h);
-        svg_ps_lineto(s, xc + h, yc - h);
-        svg_ps_closepath(s);
-        svg_ps_emit_path(s, outline, !outline);
-      }
-      else if( strcmp(shape, "cross") == 0 )
-      {
-        svg_ps_moveto(s, xc - ss, yc - ss);
-        svg_ps_lineto(s, xc + ss, yc + ss);
-        svg_ps_emit_path(s, 1, 0);
-        svg_ps_moveto(s, xc - ss, yc + ss);
-        svg_ps_lineto(s, xc + ss, yc - ss);
-        svg_ps_emit_path(s, 1, 0);
-      }
-      else if( strcmp(shape, "plus") == 0 )
-      {
-        svg_ps_moveto(s, xc - ss, yc);
-        svg_ps_lineto(s, xc + ss, yc);
-        svg_ps_emit_path(s, 1, 0);
-        svg_ps_moveto(s, xc, yc - ss);
-        svg_ps_lineto(s, xc, yc + ss);
-        svg_ps_emit_path(s, 1, 0);
-      }
-      return 1;
-    }
-  }
+  /* @Graph plot-symbol prologue procs - factored into svg_ps_exec_symbol.  */
+  case SVG_OP_SYM_FILLEDSQUARE:   case SVG_OP_SYM_DOFILLEDSQUARE:
+  case SVG_OP_SYM_SQUARE:         case SVG_OP_SYM_DOSQUARE:
+  case SVG_OP_SYM_FILLEDCIRCLE:   case SVG_OP_SYM_DOFILLEDCIRCLE:
+  case SVG_OP_SYM_CIRCLE:         case SVG_OP_SYM_DOCIRCLE:
+  case SVG_OP_SYM_FILLEDDIAMOND:  case SVG_OP_SYM_DOFILLEDDIAMOND:
+  case SVG_OP_SYM_DIAMOND:        case SVG_OP_SYM_DODIAMOND:
+  case SVG_OP_SYM_FILLEDTRIANGLE: case SVG_OP_SYM_DOFILLEDTRIANGLE:
+  case SVG_OP_SYM_TRIANGLE:       case SVG_OP_SYM_DOTRIANGLE:
+  case SVG_OP_SYM_CROSS:          case SVG_OP_SYM_DOCROSS:
+  case SVG_OP_SYM_PLUS:           case SVG_OP_SYM_DOPLUS:
+    return svg_ps_exec_symbol(s, name, op_id);
 
   /* Lout prologue named procedures - direct C implementations */
-  if( strcmp(name, "LoutGraphic") == 0 )
-  {
+  case SVG_OP_LOUTGRAPHIC:
     svg_var_louts = svg_ps_pop(s);
     svg_var_loutv = svg_ps_pop(s);
     svg_var_loutf = svg_ps_pop(s);
@@ -3422,23 +3496,18 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_var_ysize = svg_ps_pop(s);
     svg_var_xsize = svg_ps_pop(s);
     return 1;
-  }
-  if( strcmp(name, "LoutBox") == 0 )
-  {
+  case SVG_OP_LOUTBOX:
     svg_ps_moveto(s, 0.0, 0.0);
     svg_ps_lineto(s, svg_var_xsize, 0.0);
     svg_ps_lineto(s, svg_var_xsize, svg_var_ysize);
     svg_ps_lineto(s, 0.0, svg_var_ysize);
     svg_ps_closepath(s);
     return 1;
-  }
-  if( strcmp(name, "LoutRule") == 0 )
-  {
+  case SVG_OP_LOUTRULE:
     svg_ps_moveto(s, 0.0, 0.0);
     svg_ps_lineto(s, svg_var_xsize, 0.0);
     return 1;
-  }
-  if( strcmp(name, "LoutCurveBox") == 0 )
+  case SVG_OP_LOUTCURVEBOX:
   {
     double xm, xs, ys;
     xm = svg_var_xmark; xs = svg_var_xsize; ys = svg_var_ysize;
@@ -3450,7 +3519,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_closepath(s);
     return 1;
   }
-  if( strcmp(name, "LoutShadowBox") == 0 )
+  case SVG_OP_LOUTSHADOWBOX:
   {
     double xm = svg_var_xmark, xs = svg_var_xsize, ys = svg_var_ysize;
     svg_ps_moveto(s, xm * 2.0, 0.0);
@@ -3462,7 +3531,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_closepath(s);
     return 1;
   }
-  if( strcmp(name, "LoutGr2") == 0 )
+  case SVG_OP_LOUTGR2:
   {
     /* gsave translate LoutGraphic gsave -- on stack:                       */
     /* xsize ysize xmark ymark loutf loutv louts tx ty LoutGr2              */
@@ -3483,17 +3552,14 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_var_xsize = svg_ps_pop(s);
     return 1;
   }
-  if( strcmp(name, "save_cp") == 0 ||
-      strcmp(name, "restore_cp") == 0 )
+  case SVG_OP_SAVE_CP:
     return 1;
-  if( strcmp(name, "LoutTextureSolid") == 0 )
-  {
+  case SVG_OP_LOUTTEXTURESOLID:
     /* PS: { null LoutSetTexture } bind def.  Clear any active texture so   */
     /* subsequent fills go back to a plain colour.                          */
     s->gs[s->gs_top].texture_kind = SVG_TEX_SOLID;
     return 1;
-  }
-  if( strcmp(name, "LoutSetTexture") == 0 )
+  case SVG_OP_LOUTSETTEXTURE:
   {
     /* PS: { pop } (no-texture build) or texture-stack manipulation.  Both    */
     /* variants consume exactly one operand.  An earlier no-op handler left   */
@@ -3517,7 +3583,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       s->gs[s->gs_top].texture_kind = SVG_TEX_SOLID;
     return 1;
   }
-  if( strcmp(name, "LoutMakeTexture") == 0 )
+  case SVG_OP_LOUTMAKETEXTURE:
   {
     /* PS: consumes 11 operands -- scale scalex scaley rotate hshift vshift   */
     /* painttype bbox xstep ystep paintproc -- and pushes a "pattern" value.  */
@@ -3541,7 +3607,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   }
 
   /* dictionary ops */
-  if( strcmp(name, "dict") == 0 )
+  case SVG_OP_DICT:
   {
     int id;
     svg_value out;
@@ -3557,8 +3623,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "begin") == 0 )
-  {
+  case SVG_OP_BEGIN:
     va = svg_ps_pop_value(s);
     if( va.kind == SVG_VK_DICT && svg_dict_top + 1 < SVG_PS_DICT_STACK_DEPTH )
     {
@@ -3566,9 +3631,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       svg_dict_stack[svg_dict_top] = va.dict_id;
     }
     return 1;
-  }
-  if( strcmp(name, "end") == 0 )
-  {
+  case SVG_OP_END:
     if( svg_dict_top > 0 )
     {
       int did = svg_dict_stack[svg_dict_top];
@@ -3578,8 +3641,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       svg_dict_try_free_anonymous(did, s);
     }
     return 1;
-  }
-  if( strcmp(name, "currentdict") == 0 )
+  case SVG_OP_CURRENTDICT:
   {
     svg_value out;
     out.kind = SVG_VK_DICT;
@@ -3591,12 +3653,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "userdict") == 0 ||
-      strcmp(name, "systemdict") == 0 ||
-      strcmp(name, "globaldict") == 0 ||
-      strcmp(name, "errordict") == 0 ||
-      strcmp(name, "statusdict") == 0 ||
-      strcmp(name, "$error") == 0 )
+  case SVG_OP_SYSDICT:
   {
     /* Push the userdict slot as a stand-in for any system-defined dict.   */
     /* This keeps `<dictname> begin ... end` (used by prologue stanzas     */
@@ -3613,15 +3670,13 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "def") == 0 )
-  {
+  case SVG_OP_DEF:
     vb = svg_ps_pop_value(s);  /* value */
     va = svg_ps_pop_value(s);  /* name */
     if( va.kind == SVG_VK_LITNAME && va.name != NULL )
       svg_dict_stack_def(va.name, &vb);
     return 1;
-  }
-  if( strcmp(name, "load") == 0 )
+  case SVG_OP_LOAD:
   {
     svg_value out;
     va = svg_ps_pop_value(s);
@@ -3637,7 +3692,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "where") == 0 )
+  case SVG_OP_WHERE:
   {
     svg_value out;
     const char *key;
@@ -3673,7 +3728,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       svg_ps_push_bool(s, 0);
     return 1;
   }
-  if( strcmp(name, "known") == 0 )
+  case SVG_OP_KNOWN:
   {
     svg_value out;
     int found;
@@ -3685,19 +3740,16 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push_bool(s, found);
     return 1;
   }
-  if( strcmp(name, "exec") == 0 )
-  {
+  case SVG_OP_EXEC:
     va = svg_ps_pop_value(s);
     if( va.kind == SVG_VK_PROC )
       svg_ps_exec_proc(s, &va);
     else
       svg_ps_exec_value(s, &va);
     return 1;
-  }
-  if( strcmp(name, "bind") == 0 )
+  case SVG_OP_BIND:
     return 1;   /* no-op */
-  if( strcmp(name, "cvx") == 0 )
-  {
+  case SVG_OP_CVX:
     /* Make the top stack item executable.  Arrays become procedures and    */
     /* literal names become executable names.  Critical for prologue code   */
     /* that builds executable arrays inline via [ ... /op cvx ... ] cvx --  */
@@ -3711,9 +3763,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
         s->stack[s->top - 1].kind = SVG_VK_NAME;
     }
     return 1;
-  }
-  if( strcmp(name, "cvlit") == 0 )
-  {
+  case SVG_OP_CVLIT:
     if( s->top > 0 )
     {
       if( s->stack[s->top - 1].kind == SVG_VK_PROC )
@@ -3722,8 +3772,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
         s->stack[s->top - 1].kind = SVG_VK_LITNAME;
     }
     return 1;
-  }
-  if( strcmp(name, "type") == 0 )
+  case SVG_OP_TYPE:
   {
     svg_value out;
     const char *tn;
@@ -3750,17 +3799,15 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "xcheck") == 0 )
-  {
+  case SVG_OP_XCHECK:
     va = svg_ps_pop_value(s);
     svg_ps_push_bool(s, va.kind == SVG_VK_PROC || va.kind == SVG_VK_NAME);
     return 1;
-  }
 
   /* boolean predicates */
-  if( strcmp(name, "true") == 0 )  { svg_ps_push_bool(s, 1); return 1; }
-  if( strcmp(name, "false") == 0 ) { svg_ps_push_bool(s, 0); return 1; }
-  if( strcmp(name, "null") == 0 )
+  case SVG_OP_TRUE:  svg_ps_push_bool(s, 1); return 1;
+  case SVG_OP_FALSE: svg_ps_push_bool(s, 0); return 1;
+  case SVG_OP_NULL:
   {
     svg_value out;
     out.kind = SVG_VK_NULL;
@@ -3770,7 +3817,8 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     return 1;
   }
 
-  if( strcmp(name, "eq") == 0 || strcmp(name, "ne") == 0 )
+  case SVG_OP_EQ:
+  case SVG_OP_NE:
   {
     int eq = 0;
     vb = svg_ps_pop_value(s); va = svg_ps_pop_value(s);
@@ -3794,64 +3842,65 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
             strcmp(va.name, vb.name) == 0);
     else
       eq = (va.kind == vb.kind);
-    if( strcmp(name, "ne") == 0 ) eq = !eq;
+    if( op_id == SVG_OP_NE ) eq = !eq;
     svg_ps_push_bool(s, eq);
     return 1;
   }
-  if( strcmp(name, "lt") == 0 || strcmp(name, "gt") == 0 ||
-      strcmp(name, "le") == 0 || strcmp(name, "ge") == 0 )
+  case SVG_OP_LT:
+  case SVG_OP_GT:
+  case SVG_OP_LE:
+  case SVG_OP_GE:
   {
     int r;
     b = svg_ps_pop(s); a = svg_ps_pop(s);
-    if( strcmp(name, "lt") == 0 ) r = (a <  b);
-    else if( strcmp(name, "gt") == 0 ) r = (a >  b);
-    else if( strcmp(name, "le") == 0 ) r = (a <= b);
+    if( op_id == SVG_OP_LT ) r = (a <  b);
+    else if( op_id == SVG_OP_GT ) r = (a >  b);
+    else if( op_id == SVG_OP_LE ) r = (a <= b);
     else r = (a >= b);
     svg_ps_push_bool(s, r);
     return 1;
   }
-  if( strcmp(name, "and") == 0 || strcmp(name, "or") == 0 ||
-      strcmp(name, "xor") == 0 )
+  case SVG_OP_AND:
+  case SVG_OP_OR:
+  case SVG_OP_XOR:
   {
     int ai, bi, r;
     b = svg_ps_pop(s); a = svg_ps_pop(s);
     ai = a != 0.0; bi = b != 0.0;
-    if( strcmp(name, "and") == 0 ) r = ai & bi;
-    else if( strcmp(name, "or") == 0 ) r = ai | bi;
+    if( op_id == SVG_OP_AND ) r = ai & bi;
+    else if( op_id == SVG_OP_OR ) r = ai | bi;
     else r = ai ^ bi;
     svg_ps_push_bool(s, r);
     return 1;
   }
-  if( strcmp(name, "not") == 0 )
-  {
+  case SVG_OP_NOT:
     a = svg_ps_pop(s);
     svg_ps_push_bool(s, a == 0.0);
     return 1;
-  }
 
   /* arithmetic */
-  if( strcmp(name, "add") == 0 ) { b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, a + b); return 1; }
-  if( strcmp(name, "sub") == 0 ) { b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, a - b); return 1; }
-  if( strcmp(name, "mul") == 0 ) { b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, a * b); return 1; }
-  if( strcmp(name, "div") == 0 )
-  { b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, b == 0.0 ? 0.0 : a / b); return 1; }
-  if( strcmp(name, "idiv") == 0 )
-  { b = svg_ps_pop(s); a = svg_ps_pop(s);
+  case SVG_OP_ADD: b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, a + b); return 1;
+  case SVG_OP_SUB: b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, a - b); return 1;
+  case SVG_OP_MUL: b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, a * b); return 1;
+  case SVG_OP_DIV:
+    b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, b == 0.0 ? 0.0 : a / b); return 1;
+  case SVG_OP_IDIV:
+    b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_push_num(s, b == 0.0 ? 0.0 : (double)((long)a / (long)b));
-    return 1; }
-  if( strcmp(name, "mod") == 0 )
-  { b = svg_ps_pop(s); a = svg_ps_pop(s);
+    return 1;
+  case SVG_OP_MOD:
+    b = svg_ps_pop(s); a = svg_ps_pop(s);
     svg_ps_push_num(s, b == 0.0 ? 0.0 : (double)((long)a % (long)b));
-    return 1; }
-  if( strcmp(name, "neg") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, -a); return 1; }
-  if( strcmp(name, "abs") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a < 0 ? -a : a); return 1; }
-  if( strcmp(name, "sqrt") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a < 0 ? 0.0 : sqrt(a)); return 1; }
-  if( strcmp(name, "sin") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, sin(a * SVG_PI / 180.0)); return 1; }
-  if( strcmp(name, "cos") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, cos(a * SVG_PI / 180.0)); return 1; }
-  if( strcmp(name, "atan") == 0 )
-  { b = svg_ps_pop(s); a = svg_ps_pop(s);
+    return 1;
+  case SVG_OP_NEG: a = svg_ps_pop(s); svg_ps_push_num(s, -a); return 1;
+  case SVG_OP_ABS: a = svg_ps_pop(s); svg_ps_push_num(s, a < 0 ? -a : a); return 1;
+  case SVG_OP_SQRT: a = svg_ps_pop(s); svg_ps_push_num(s, a < 0 ? 0.0 : sqrt(a)); return 1;
+  case SVG_OP_SIN:
+    a = svg_ps_pop(s); svg_ps_push_num(s, sin(a * SVG_PI / 180.0)); return 1;
+  case SVG_OP_COS:
+    a = svg_ps_pop(s); svg_ps_push_num(s, cos(a * SVG_PI / 180.0)); return 1;
+  case SVG_OP_ATAN:
+    b = svg_ps_pop(s); a = svg_ps_pop(s);
     {
       double r;
       if( a == 0.0 && b == 0.0 ) r = 0.0;
@@ -3859,25 +3908,25 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       if( r < 0.0 ) r += 360.0;
       svg_ps_push_num(s, r);
     }
-    return 1; }
-  if( strcmp(name, "exp") == 0 )
-  { b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, pow(a, b)); return 1; }
-  if( strcmp(name, "ln") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, a <= 0 ? 0.0 : log(a)); return 1; }
-  if( strcmp(name, "log") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, a <= 0 ? 0.0 : log10(a)); return 1; }
-  if( strcmp(name, "truncate") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, a >= 0 ? floor(a) : ceil(a)); return 1; }
-  if( strcmp(name, "floor") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, floor(a)); return 1; }
-  if( strcmp(name, "ceiling") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, ceil(a)); return 1; }
-  if( strcmp(name, "round") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, floor(a + 0.5)); return 1; }
-  if( strcmp(name, "cvi") == 0 )
-  { a = svg_ps_pop(s); svg_ps_push_num(s, (double)(long)a); return 1; }
-  if( strcmp(name, "cvr") == 0 ) return 1;  /* numeric already */
-  if( strcmp(name, "cvs") == 0 )
+    return 1;
+  case SVG_OP_EXP:
+    b = svg_ps_pop(s); a = svg_ps_pop(s); svg_ps_push_num(s, pow(a, b)); return 1;
+  case SVG_OP_LN:
+    a = svg_ps_pop(s); svg_ps_push_num(s, a <= 0 ? 0.0 : log(a)); return 1;
+  case SVG_OP_LOG:
+    a = svg_ps_pop(s); svg_ps_push_num(s, a <= 0 ? 0.0 : log10(a)); return 1;
+  case SVG_OP_TRUNCATE:
+    a = svg_ps_pop(s); svg_ps_push_num(s, a >= 0 ? floor(a) : ceil(a)); return 1;
+  case SVG_OP_FLOOR:
+    a = svg_ps_pop(s); svg_ps_push_num(s, floor(a)); return 1;
+  case SVG_OP_CEILING:
+    a = svg_ps_pop(s); svg_ps_push_num(s, ceil(a)); return 1;
+  case SVG_OP_ROUND:
+    a = svg_ps_pop(s); svg_ps_push_num(s, floor(a + 0.5)); return 1;
+  case SVG_OP_CVI:
+    a = svg_ps_pop(s); svg_ps_push_num(s, (double)(long)a); return 1;
+  case SVG_OP_CVR: return 1;  /* numeric already */
+  case SVG_OP_CVS:
   {
     char numbuf[64];
     svg_value out;
@@ -3906,8 +3955,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
-  if( strcmp(name, "cvn") == 0 )
-  {
+  case SVG_OP_CVN:
     va = svg_ps_pop_value(s);
     if( va.kind == SVG_VK_STRING )
     {
@@ -3917,8 +3965,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     else
       svg_ps_push(s, &va);
     return 1;
-  }
-  if( strcmp(name, "string") == 0 )
+  case SVG_OP_STRING:
   {
     svg_value out;
     int slen;
@@ -3943,18 +3990,15 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   }
 
   /* stack manipulation */
-  if( strcmp(name, "pop") == 0 ) { (void) svg_ps_pop_value(s); return 1; }
-  if( strcmp(name, "dup") == 0 )
-  {
+  case SVG_OP_POP: (void) svg_ps_pop_value(s); return 1;
+  case SVG_OP_DUP:
     if( s->top > 0 )
     {
       svg_value top = s->stack[s->top - 1];
       svg_ps_push(s, &top);
     }
     return 1;
-  }
-  if( strcmp(name, "exch") == 0 )
-  {
+  case SVG_OP_EXCH:
     if( s->top >= 2 )
     {
       svg_value t = s->stack[s->top - 1];
@@ -3962,8 +4006,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       s->stack[s->top - 2] = t;
     }
     return 1;
-  }
-  if( strcmp(name, "index") == 0 )
+  case SVG_OP_INDEX:
   {
     int n;
     a = svg_ps_pop(s);
@@ -3975,7 +4018,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "copy") == 0 )
+  case SVG_OP_COPY:
   {
     int n, i;
     if( s->top > 0 && s->stack[s->top - 1].kind == SVG_VK_NUM )
@@ -3996,7 +4039,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "roll") == 0 )
+  case SVG_OP_ROLL:
   {
     int n, j, k, i;
     svg_value tmp[SVG_PS_STACK_DEPTH];
@@ -4015,9 +4058,9 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "clear") == 0 ) { s->top = 0; return 1; }
-  if( strcmp(name, "count") == 0 ) { svg_ps_push_num(s, (double) s->top); return 1; }
-  if( strcmp(name, "mark") == 0 )
+  case SVG_OP_CLEAR: s->top = 0; return 1;
+  case SVG_OP_COUNT: svg_ps_push_num(s, (double) s->top); return 1;
+  case SVG_OP_MARK:
   {
     svg_value m;
     m.kind = SVG_VK_MARK; m.num = 0.0; m.name = NULL;
@@ -4025,7 +4068,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &m);
     return 1;
   }
-  if( strcmp(name, "cleartomark") == 0 )
+  case SVG_OP_CLEARTOMARK:
   {
     int i;
     for( i = s->top - 1; i >= 0; i-- )
@@ -4033,7 +4076,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     s->top = 0;
     return 1;
   }
-  if( strcmp(name, "counttomark") == 0 )
+  case SVG_OP_COUNTTOMARK:
   {
     int i, c = 0;
     for( i = s->top - 1; i >= 0; i-- )
@@ -4046,7 +4089,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   }
 
   /* array constructor terminator ']' */
-  if( strcmp(name, "]") == 0 )
+  case SVG_OP_RBRACKET:
   {
     svg_value arr;
     svg_collect_to_mark(s, &arr);
@@ -4055,7 +4098,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   }
 
   /* array ops */
-  if( strcmp(name, "aload") == 0 )
+  case SVG_OP_ALOAD:
   {
     int i;
     va = svg_ps_pop_value(s);
@@ -4067,7 +4110,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "astore") == 0 )
+  case SVG_OP_ASTORE:
   {
     int i;
     va = svg_ps_pop_value(s);
@@ -4082,8 +4125,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "length") == 0 )
-  {
+  case SVG_OP_LENGTH:
     va = svg_ps_pop_value(s);
     if( va.kind == SVG_VK_ARRAY || va.kind == SVG_VK_PROC )
       svg_ps_push_num(s, (double) va.nitems);
@@ -4092,8 +4134,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     else
       svg_ps_push_num(s, 0.0);
     return 1;
-  }
-  if( strcmp(name, "get") == 0 )
+  case SVG_OP_GET:
   {
     svg_value out;
     int idx;
@@ -4115,7 +4156,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "put") == 0 )
+  case SVG_OP_PUT:
   {
     svg_value vv = svg_ps_pop_value(s);  /* value */
     vb = svg_ps_pop_value(s);            /* key */
@@ -4130,7 +4171,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "putinterval") == 0 )
+  case SVG_OP_PUTINTERVAL:
   {
     /* dest index src  putinterval  --   (string variant; copies src into  */
     /* dest starting at index, mutating dest in place).                    */
@@ -4150,7 +4191,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  if( strcmp(name, "search") == 0 )
+  case SVG_OP_SEARCH:
   {
     /* string seek  search  -> post match pre true                         */
     /*                      -> string false   (if not found)                */
@@ -4202,14 +4243,14 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   }
 
   /* control flow */
-  if( strcmp(name, "if") == 0 )
+  case SVG_OP_IF:
   {
     svg_value proc = svg_ps_pop_value(s);
     a = svg_ps_pop(s);
     if( a != 0.0 ) svg_ps_call(s, &proc);
     return 1;
   }
-  if( strcmp(name, "ifelse") == 0 )
+  case SVG_OP_IFELSE:
   {
     svg_value pf = svg_ps_pop_value(s);  /* false branch */
     svg_value pt = svg_ps_pop_value(s);  /* true branch */
@@ -4218,7 +4259,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     else            svg_ps_call(s, &pf);
     return 1;
   }
-  if( strcmp(name, "for") == 0 )
+  case SVG_OP_FOR:
   {
     svg_value proc = svg_ps_pop_value(s);
     double init, incr, limit, val;
@@ -4238,7 +4279,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_exit_flag = 0;
     return 1;
   }
-  if( strcmp(name, "repeat") == 0 )
+  case SVG_OP_REPEAT:
   {
     svg_value proc = svg_ps_pop_value(s);
     int n, i;
@@ -4251,7 +4292,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_exit_flag = 0;
     return 1;
   }
-  if( strcmp(name, "loop") == 0 )
+  case SVG_OP_LOOP:
   {
     svg_value proc = svg_ps_pop_value(s);
     int safety = 100000;
@@ -4263,7 +4304,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_exit_flag = 0;
     return 1;
   }
-  if( strcmp(name, "forall") == 0 )
+  case SVG_OP_FORALL:
   {
     svg_value proc = svg_ps_pop_value(s);
     int i;
@@ -4301,9 +4342,9 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_exit_flag = 0;
     return 1;
   }
-  if( strcmp(name, "exit") == 0 ) { svg_exit_flag = 1; return 1; }
-  if( strcmp(name, "stop") == 0 ) { svg_stop_flag = 1; return 1; }
-  if( strcmp(name, "stopped") == 0 )
+  case SVG_OP_EXIT: svg_exit_flag = 1; return 1;
+  case SVG_OP_STOP: svg_stop_flag = 1; return 1;
+  case SVG_OP_STOPPED:
   {
     svg_value proc = svg_ps_pop_value(s);
     int was_stop = svg_stop_flag;
@@ -4319,16 +4360,182 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
 
   /* Lout numeric prologue helpers (defined in z49.c prologue):              */
   /*   in cm pt em sp vs ft dg - these multiply by scale constants.          */
-  if( strcmp(name, "in") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * 1440.0); return 1; }
-  if( strcmp(name, "cm") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * 566.929); return 1; }
-  if( strcmp(name, "pt") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * 20.0); return 1; }
-  if( strcmp(name, "em") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * 120.0); return 1; }
-  if( strcmp(name, "sp") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * svg_var_louts); return 1; }
-  if( strcmp(name, "vs") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * svg_var_loutv); return 1; }
-  if( strcmp(name, "ft") == 0 ) { a = svg_ps_pop(s); svg_ps_push_num(s, a * svg_var_loutf); return 1; }
-  if( strcmp(name, "dg") == 0 ) return 1;  /* identity */
+  case SVG_OP_IN: a = svg_ps_pop(s); svg_ps_push_num(s, a * 1440.0); return 1;
+  case SVG_OP_CM: a = svg_ps_pop(s); svg_ps_push_num(s, a * 566.929); return 1;
+  case SVG_OP_PT: a = svg_ps_pop(s); svg_ps_push_num(s, a * 20.0); return 1;
+  case SVG_OP_EM: a = svg_ps_pop(s); svg_ps_push_num(s, a * 120.0); return 1;
+  case SVG_OP_SP: a = svg_ps_pop(s); svg_ps_push_num(s, a * svg_var_louts); return 1;
+  case SVG_OP_VS: a = svg_ps_pop(s); svg_ps_push_num(s, a * svg_var_loutv); return 1;
+  case SVG_OP_FT: a = svg_ps_pop(s); svg_ps_push_num(s, a * svg_var_loutf); return 1;
+  case SVG_OP_DG: return 1;  /* identity */
 
-  return 0;
+  default:
+    return 0;
+  }  /* switch */
+}
+
+/* @Graph plot-symbol prologue procs - factored out of svg_ps_exec_op.  See */
+/* notes in the original implementation: bypass the dict procs entirely    */
+/* and draw a fixed-size symbol path centred at (xcurr, ycurr) directly.   */
+static int svg_ps_exec_symbol(svg_ps_state *s, const char *name,
+  svg_op_id op_id)
+{
+  double slw, ss, yc, xc;
+  int is_do = (strncmp(name, "do", 2) == 0);
+  int outline = 0;
+  const char *shape;
+  (void) op_id;  /* the resolved op_id is informational; name carries shape */
+  /* All graphf.lpg symbols use an "open" form (square, circle, ...)    */
+  /* drawn as an outline stroke, and a "filled" form (filledsquare,    */
+  /* ...) drawn as a solid fill.  cross/plus are stroked single-line  */
+  /* glyphs in both forms (no fill).                                  */
+  shape = is_do ? name + 2 : name;
+  if( strcmp(shape, "square") == 0 || strcmp(shape, "diamond") == 0 ||
+      strcmp(shape, "circle") == 0 || strcmp(shape, "triangle") == 0 )
+    outline = 1;
+  if( !is_do )
+  {
+    /* No-arg wrapper: pull xcurr/ycurr/symbolsize/symbollinewidth     */
+    /* from the dict stack, transform (xcurr, ycurr) via the same     */
+    /* axis-mapping that trpoint does.  Fall back to (0, 0) and a    */
+    /* sensible default size if any lookup fails, so we degrade        */
+    /* gracefully rather than blowing up the page.                    */
+    svg_value vv;
+    double xcur = 0.0, ycur = 0.0;
+    if( svg_dict_stack_lookup("xcurr", &vv) && vv.kind == SVG_VK_NUM )
+      xcur = vv.num;
+    if( svg_dict_stack_lookup("ycurr", &vv) && vv.kind == SVG_VK_NUM )
+      ycur = vv.num;
+    ss = 0.15 * svg_var_loutf;
+    if( svg_dict_stack_lookup("symbolsize", &vv) && vv.kind == SVG_VK_NUM )
+      ss = vv.num;
+    slw = 0.5;
+    if( svg_dict_stack_lookup("symbollinewidth", &vv) && vv.kind == SVG_VK_NUM )
+      slw = vv.num;
+    /* trpoint: map data-space (xcur, ycur) -> graphic-space (xc, yc). */
+    /* Implemented by inlining the relevant graphf.lpg arithmetic       */
+    /* using dict-bound axis variables.  All of these are simple        */
+    /* numerics defined by xset / yset; if they're missing we leave    */
+    /* the point un-transformed, which still beats a 5x-size blob.     */
+    {
+      double trxmin = 0, trxmax = 1, trymin = 0, trymax = 1;
+      double xwidth = 0, ywidth = 0, xextra = 0, yextra = 0;
+      double xdecr = 0, ydecr = 0;
+      double xlog = 0, ylog = 0;
+      if( svg_dict_stack_lookup("trxmin", &vv) && vv.kind == SVG_VK_NUM )
+        trxmin = vv.num;
+      if( svg_dict_stack_lookup("trxmax", &vv) && vv.kind == SVG_VK_NUM )
+        trxmax = vv.num;
+      if( svg_dict_stack_lookup("trymin", &vv) && vv.kind == SVG_VK_NUM )
+        trymin = vv.num;
+      if( svg_dict_stack_lookup("trymax", &vv) && vv.kind == SVG_VK_NUM )
+        trymax = vv.num;
+      if( svg_dict_stack_lookup("xwidth", &vv) && vv.kind == SVG_VK_NUM )
+        xwidth = vv.num;
+      if( svg_dict_stack_lookup("ywidth", &vv) && vv.kind == SVG_VK_NUM )
+        ywidth = vv.num;
+      if( svg_dict_stack_lookup("xextra", &vv) && vv.kind == SVG_VK_NUM )
+        xextra = vv.num;
+      if( svg_dict_stack_lookup("yextra", &vv) && vv.kind == SVG_VK_NUM )
+        yextra = vv.num;
+      /* xdecr/ydecr: graphf.lpg's xset/yset bind these from a boolean    */
+      /* argument via `/xdecr exch def`, so the dict entry has kind BOOL  */
+      /* (vv.num == 1.0 for true, 0.0 for false), not NUM.  Accept both   */
+      /* so the symbol position tracks descending-axis graphs the same    */
+      /* way the curve does.                                              */
+      if( svg_dict_stack_lookup("xdecr", &vv) &&
+          (vv.kind == SVG_VK_NUM || vv.kind == SVG_VK_BOOL) )
+        xdecr = vv.num;
+      if( svg_dict_stack_lookup("ydecr", &vv) &&
+          (vv.kind == SVG_VK_NUM || vv.kind == SVG_VK_BOOL) )
+        ydecr = vv.num;
+      if( svg_dict_stack_lookup("xlog", &vv) && vv.kind == SVG_VK_NUM )
+        xlog = vv.num;
+      if( svg_dict_stack_lookup("ylog", &vv) && vv.kind == SVG_VK_NUM )
+        ylog = vv.num;
+      if( xlog > 1 && xcur > 0 ) xcur = log(xcur) / log(xlog);
+      if( ylog > 1 && ycur > 0 ) ycur = log(ycur) / log(ylog);
+      if( trxmax - trxmin != 0.0 )
+        xc = (xdecr != 0.0 ? (trxmax - xcur) : (xcur - trxmin))
+             / (trxmax - trxmin) * xwidth + xextra;
+      else
+        xc = xextra;
+      if( trymax - trymin != 0.0 )
+        yc = (ydecr != 0.0 ? (trymax - ycur) : (ycur - trymin))
+             / (trymax - trymin) * ywidth + yextra;
+      else
+        yc = yextra;
+    }
+  }
+  else
+  {
+    /* do<shape>: 4-arg form, stack has x y symbolsize symbollinewidth. */
+    slw = svg_ps_pop(s);
+    ss  = svg_ps_pop(s);
+    yc  = svg_ps_pop(s);
+    xc  = svg_ps_pop(s);
+  }
+  if( strcmp(shape, "square") == 0 )
+  {
+    double half = outline ? (ss - slw * 0.5) : ss;
+    if( half < 0.0 ) half = 0.0;
+    svg_ps_moveto(s, xc - half, yc - half);
+    svg_ps_lineto(s, xc + half, yc - half);
+    svg_ps_lineto(s, xc + half, yc + half);
+    svg_ps_lineto(s, xc - half, yc + half);
+    svg_ps_closepath(s);
+    svg_ps_emit_path(s, outline, !outline);
+  }
+  else if( strcmp(shape, "circle") == 0 )
+  {
+    double r = outline ? (ss - slw * 0.5) : ss;
+    if( r < 0.0 ) r = 0.0;
+    svg_ps_moveto(s, xc + r, yc);
+    svg_ps_arc(s, xc, yc, r, 0.0, 180.0, 1);
+    svg_ps_arc(s, xc, yc, r, 180.0, 360.0, 1);
+    svg_ps_closepath(s);
+    svg_ps_emit_path(s, outline, !outline);
+  }
+  else if( strcmp(shape, "diamond") == 0 )
+  {
+    double half = outline ? (ss - slw * 0.5) : ss;
+    if( half < 0.0 ) half = 0.0;
+    svg_ps_moveto(s, xc - half, yc);
+    svg_ps_lineto(s, xc, yc - half);
+    svg_ps_lineto(s, xc + half, yc);
+    svg_ps_lineto(s, xc, yc + half);
+    svg_ps_closepath(s);
+    svg_ps_emit_path(s, outline, !outline);
+  }
+  else if( strcmp(shape, "triangle") == 0 )
+  {
+    double h = outline ? (ss - slw * 0.5) : ss;
+    if( h < 0.0 ) h = 0.0;
+    svg_ps_moveto(s, xc, yc + h * 1.5);
+    svg_ps_lineto(s, xc - h, yc - h);
+    svg_ps_lineto(s, xc + h, yc - h);
+    svg_ps_closepath(s);
+    svg_ps_emit_path(s, outline, !outline);
+  }
+  else if( strcmp(shape, "cross") == 0 )
+  {
+    svg_ps_moveto(s, xc - ss, yc - ss);
+    svg_ps_lineto(s, xc + ss, yc + ss);
+    svg_ps_emit_path(s, 1, 0);
+    svg_ps_moveto(s, xc - ss, yc + ss);
+    svg_ps_lineto(s, xc + ss, yc - ss);
+    svg_ps_emit_path(s, 1, 0);
+  }
+  else if( strcmp(shape, "plus") == 0 )
+  {
+    svg_ps_moveto(s, xc - ss, yc);
+    svg_ps_lineto(s, xc + ss, yc);
+    svg_ps_emit_path(s, 1, 0);
+    svg_ps_moveto(s, xc, yc - ss);
+    svg_ps_lineto(s, xc, yc + ss);
+    svg_ps_emit_path(s, 1, 0);
+  }
+  return 1;
 }
 
 
