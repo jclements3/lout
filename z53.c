@@ -1245,6 +1245,17 @@ typedef struct svg_gstate {
   /* directly.  Both fields are copied by gsave / restored by grestore. */
   char   font_name[64];
   double font_size;             /* in internal units (multiples of PT)  */
+  /* Line-style attributes recorded by setlinecap / setlinejoin /        */
+  /* setmiterlimit and emitted on the next stroke.  PS encodings:        */
+  /*    setlinecap:  0=butt, 1=round, 2=square                            */
+  /*    setlinejoin: 0=miter, 1=round, 2=bevel                            */
+  /* line_cap / line_join < 0 means "unset" (omit attribute on stroke,   */
+  /* falling back to the SVG default of butt / miter).  miter_limit < 0  */
+  /* same convention.  Both fields are copied by gsave/restored by       */
+  /* grestore via the struct-copy that GSAVE/GRESTORE already perform.   */
+  int    line_cap;
+  int    line_join;
+  double miter_limit;
 } svg_gstate;
 
 /* Named textures recognised by the proc-body scanner inside              */
@@ -1951,6 +1962,10 @@ static void svg_ps_init(svg_ps_state *s)
   /* findfont/scalefont/setfont sequence in the prologue will override.*/
   strcpy(s->gs[0].font_name, "Times-Roman");
   s->gs[0].font_size = 10.0 * (double) PT;
+  /* line-style: -1 means unset (omit on stroke, fall back to SVG default). */
+  s->gs[0].line_cap    = -1;
+  s->gs[0].line_join   = -1;
+  s->gs[0].miter_limit = -1.0;
   /* svg_var_* persist across SVG_PrintGraphicObject calls (PS userdict     */
   /* semantics); they are initialised once by svg_psinterp_init.            */
   s->path[0] = '\0';
@@ -2319,12 +2334,33 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
   if( do_stroke )
   {
     const char *col = g->stroke_rgb[0] != '\0' ? g->stroke_rgb : "currentColor";
+    const char *cap_name = NULL;
+    const char *join_name = NULL;
     fprintf(out_fp, " stroke=\"%s\"", col);
     if( g->line_width > 0.0 )
       fprintf(out_fp, " stroke-width=\"%.3f\"", g->line_width);
     if( g->dasharray[0] != '\0' )
       fprintf(out_fp, " stroke-dasharray=\"%s\"", g->dasharray);
-    fputs(" stroke-linecap=\"butt\" stroke-linejoin=\"miter\"", out_fp);
+    /* stroke-linecap: 0=butt (SVG default), 1=round, 2=square.  PS and SVG */
+    /* share encodings, but only emit non-default values; the SVG default   */
+    /* matches PS's default so we can omit "butt" entirely.  Same logic for */
+    /* stroke-linejoin: 0=miter (default), 1=round, 2=bevel.                */
+    if(      g->line_cap == 1 ) cap_name = "round";
+    else if( g->line_cap == 2 ) cap_name = "square";
+    else if( g->line_cap == 0 ) cap_name = "butt";
+    if(      g->line_join == 1 ) join_name = "round";
+    else if( g->line_join == 2 ) join_name = "bevel";
+    else if( g->line_join == 0 ) join_name = "miter";
+    if( cap_name != NULL )
+      fprintf(out_fp, " stroke-linecap=\"%s\"", cap_name);
+    else
+      fputs(" stroke-linecap=\"butt\"", out_fp);
+    if( join_name != NULL )
+      fprintf(out_fp, " stroke-linejoin=\"%s\"", join_name);
+    else
+      fputs(" stroke-linejoin=\"miter\"", out_fp);
+    if( g->miter_limit > 0.0 )
+      fprintf(out_fp, " stroke-miterlimit=\"%.3f\"", g->miter_limit);
   }
   fputs("/>\n", out_fp);
   /* reset path */
@@ -2981,7 +3017,9 @@ typedef enum {
   SVG_OP_STROKE, SVG_OP_FILL,
   SVG_OP_SETRGBCOLOR, SVG_OP_SETGRAY, SVG_OP_SETHSBCOLOR, SVG_OP_SETCMYKCOLOR,
   SVG_OP_SETLINEWIDTH, SVG_OP_SETLINESTYLE, SVG_OP_SETDASH,
-  SVG_OP_GSAVE, SVG_OP_GRESTORE,
+  SVG_OP_SETLINECAP, SVG_OP_SETLINEJOIN, SVG_OP_SETMITERLIMIT,
+  SVG_OP_CURRENTLINEWIDTH, SVG_OP_LINEWIDTH,
+  SVG_OP_GSAVE, SVG_OP_GRESTORE, SVG_OP_SAVE, SVG_OP_RESTORE,
   SVG_OP_TRANSLATE, SVG_OP_SCALE, SVG_OP_ROTATE, SVG_OP_CONCAT,
   SVG_OP_TRANSFORM, SVG_OP_DTRANSFORM,
   SVG_OP_ITRANSFORM, SVG_OP_IDTRANSFORM,
@@ -3068,10 +3106,24 @@ static const struct { const char *name; svg_op_id id; } svg_op_seed[] = {
   {"sethsbcolor", SVG_OP_SETHSBCOLOR}, {"LoutSetHSBColor", SVG_OP_SETHSBCOLOR},
   {"setcmykcolor", SVG_OP_SETCMYKCOLOR}, {"LoutSetCMYKColor", SVG_OP_SETCMYKCOLOR},
   {"setlinewidth", SVG_OP_SETLINEWIDTH},
-  {"setlinecap", SVG_OP_SETLINESTYLE}, {"setlinejoin", SVG_OP_SETLINESTYLE},
-  {"setmiterlimit", SVG_OP_SETLINESTYLE},
+  {"setlinecap", SVG_OP_SETLINECAP}, {"setlinejoin", SVG_OP_SETLINEJOIN},
+  {"setmiterlimit", SVG_OP_SETMITERLIMIT},
+  {"currentlinewidth", SVG_OP_CURRENTLINEWIDTH},
+  /* `linewidth` is a Lout @Graph prologue option (lout/include/graph) that  */
+  /* in PostScript mode defaults to `{ currentlinewidth }` -- the user      */
+  /* expects the active stroke width.  In SVG mode the option-binding       */
+  /* machinery never runs, so the name arrives at the interpreter as an     */
+  /* undefined symbol.  Treat it as a synonym for currentlinewidth so the    */
+  /* @Graph mark-drawing procs (e.g. graphf.lpg's `linewidth setlinewidth   */
+  /* stroke` cadence) keep their stroke width across the round-trip.        */
+  {"linewidth", SVG_OP_LINEWIDTH},
   {"setdash", SVG_OP_SETDASH},
+  /* save / restore are PostScript VM snapshots whose graphics-state effect */
+  /* coincides with gsave/grestore for the small subset of state z53.c     */
+  /* tracks.  Lout's @Fig / @Diag prologues use them to bracket independent */
+  /* graphic-object emissions; alias for that purpose here.                 */
   {"gsave", SVG_OP_GSAVE}, {"grestore", SVG_OP_GRESTORE},
+  {"save", SVG_OP_SAVE}, {"restore", SVG_OP_RESTORE},
   {"translate", SVG_OP_TRANSLATE}, {"scale", SVG_OP_SCALE},
   {"rotate", SVG_OP_ROTATE}, {"concat", SVG_OP_CONCAT},
   {"transform", SVG_OP_TRANSFORM}, {"dtransform", SVG_OP_DTRANSFORM},
@@ -3304,9 +3356,54 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     a = svg_ps_pop(s);
     s->gs[s->gs_top].line_width = a / (double) PT;
     return 1;
+  case SVG_OP_SETLINECAP:
+  {
+    /* PS encoding: 0=butt 1=round 2=square.  Stored verbatim; emitted as  */
+    /* SVG stroke-linecap on the next stroke (svg_ps_emit_path).            */
+    int ic;
+    a = svg_ps_pop(s);
+    ic = (int) a;
+    if( ic < 0 ) ic = 0;
+    if( ic > 2 ) ic = 2;
+    s->gs[s->gs_top].line_cap = ic;
+    return 1;
+  }
+  case SVG_OP_SETLINEJOIN:
+  {
+    /* PS encoding: 0=miter 1=round 2=bevel.  Stored verbatim; emitted as  */
+    /* SVG stroke-linejoin on the next stroke.                              */
+    int ij;
+    a = svg_ps_pop(s);
+    ij = (int) a;
+    if( ij < 0 ) ij = 0;
+    if( ij > 2 ) ij = 2;
+    s->gs[s->gs_top].line_join = ij;
+    return 1;
+  }
+  case SVG_OP_SETMITERLIMIT:
+    a = svg_ps_pop(s);
+    if( a <= 0.0 ) a = -1.0;   /* clamp to "unset" so we omit the attr */
+    s->gs[s->gs_top].miter_limit = a;
+    return 1;
+  /* `setlinestyle` no longer occurs in the seed table; the case remains   */
+  /* for backwards-compat if any external @Graphic body still ships it as a */
+  /* single-arg combined setter -- pop and discard.                         */
   case SVG_OP_SETLINESTYLE:
     (void) svg_ps_pop(s);
     return 1;
+  case SVG_OP_CURRENTLINEWIDTH:
+  case SVG_OP_LINEWIDTH:
+  {
+    /* Push the current stroke width (in internal Lout units) back on the  */
+    /* operand stack.  line_width is stored in PT (see SETLINEWIDTH); the   */
+    /* PS convention is to express widths in user-space units, which for    */
+    /* Lout's default CTM equals internal units (1 PT = 20).  Multiply      */
+    /* back so subsequent `setlinewidth` round-trips preserve the value.    */
+    double w = s->gs[s->gs_top].line_width * (double) PT;
+    if( w <= 0.0 ) w = (double) PT;       /* harmless default: 1 PT       */
+    svg_ps_push_num(s, w);
+    return 1;
+  }
   case SVG_OP_SETDASH:
   {
     /* arg layout: <array> <offset> setdash */
@@ -3346,13 +3443,39 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     return 1;
   }
   case SVG_OP_GSAVE:
+  case SVG_OP_SAVE:
+    /* PS `save` snapshots the entire VM (graphics, dict, allocation modes)  */
+    /* and pushes a save-object on the operand stack.  z53.c's interpreter   */
+    /* tracks only the graphics state here, so the snapshot reduces to a    */
+    /* gsave -- copy the current gstate, advance gs_top.  We also push a   */
+    /* sentinel (NULL value) for `save` so a trailing `restore` finds      */
+    /* something to pop: the @Fig prologue uses `save ... restore` and     */
+    /* would otherwise underflow the operand stack.                        */
     if( s->gs_top + 1 < SVG_PS_GS_DEPTH )
     {
       s->gs[s->gs_top + 1] = s->gs[s->gs_top];
       s->gs_top++;
     }
+    if( op_id == SVG_OP_SAVE )
+    {
+      svg_value sv;
+      sv.kind = SVG_VK_NULL;
+      sv.num = 0.0;
+      sv.name = NULL;
+      sv.items = NULL;
+      sv.nitems = 0;
+      sv.dict_id = 0;
+      svg_ps_push(s, &sv);
+    }
     return 1;
   case SVG_OP_GRESTORE:
+    if( s->gs_top > 0 ) s->gs_top--;
+    return 1;
+  case SVG_OP_RESTORE:
+    /* PS `restore` consumes the save-object on top of the stack and       */
+    /* unwinds VM state to the matching `save`.  Mirror the gstate pop;    */
+    /* eat the save-object sentinel (any value will do -- we don't check). */
+    (void) svg_ps_pop_value(s);
     if( s->gs_top > 0 ) s->gs_top--;
     return 1;
   case SVG_OP_TRANSLATE:
@@ -4921,16 +5044,46 @@ static void svg_ps_exec_value(svg_ps_state *s, const svg_value *v)
       /* built-in operator? */
       if( svg_ps_exec_op(s, v->name) )
         break;
-      /* unknown: warn and skip */
+      /* unknown: warn (rate-limited) and also emit a one-line XML comment   */
+      /* in the SVG output so the fall-through is visible to readers of the */
+      /* file, not only to whoever was watching stderr.  Per-op only, not  */
+      /* per-buffer: don't drop the whole @Graphic on the floor as the   */
+      /* legacy fallback did -- the rest of the operators in the buffer  */
+      /* may still translate cleanly.                                      */
       if( svg_warn_unknown_count < SVG_WARN_MAX )
       {
         svg_warn_unknown_count++;
         if( svg_warn_unknown_count == SVG_WARN_MAX )
+        {
           fprintf(stderr,
             "lout (SVG): further unknown PostScript operators suppressed\n");
+          if( out_fp != NULL )
+            fputs("<!-- z53.c: further unknown PostScript ops suppressed -->\n",
+              out_fp);
+        }
         else
+        {
           fprintf(stderr,
             "lout (SVG): unknown PostScript operator '%s'\n", v->name);
+          if( out_fp != NULL && v->name != NULL )
+          {
+            /* sanitise: only emit alphanumerics + a small set of safe punct   */
+            /* characters to avoid accidentally closing the comment.          */
+            const char *p;
+            fputs("<!-- z53.c: unimplemented PostScript op '", out_fp);
+            for( p = v->name; *p != '\0'; p++ )
+            {
+              int ch = (unsigned char) *p;
+              if( (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' ||
+                  ch == '.' || ch == '@' )
+                fputc(ch, out_fp);
+              else
+                fputc('_', out_fp);
+            }
+            fputs("' -->\n", out_fp);
+          }
+        }
       }
       break;
 
