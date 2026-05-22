@@ -98,6 +98,23 @@ static void svg_psinterp_init(void);
 static void svg_psinterp_shutdown(void);
 static void svg_emit_pattern_defs(void);
 
+/* Glyph-outline service implemented in z53_glyph.c.  Returns 1 if the      */
+/* font + glyph are known (and the callbacks have been called to lay down   */
+/* the outline), 0 to fall back to the caller's bbox approximation.  The    */
+/* PS back end (z49.c) never calls this; it lives only for charpath in this */
+/* module.                                                                   */
+extern int svg_glyph_emit_outline(
+  const char *ps_font_name,
+  const char *glyph_name,
+  double font_size_units,
+  double x0, double y0,
+  double *advance_out,
+  void *user,
+  void (*cb_move)(void *, double, double),
+  void (*cb_line)(void *, double, double),
+  void (*cb_curve)(void *, double, double, double, double, double, double),
+  void (*cb_close)(void *));
+
 /* Static 128 KB buffer for out_fp.  Kept here (not on the stack inside     */
 /* SVG_PrintInitialize) because setvbuf documents that the supplied buffer */
 /* must outlive the stream.  glibc's default for regular files is 4 KB;    */
@@ -2178,6 +2195,93 @@ static void svg_ps_closepath(svg_ps_state *s)
 
 /*****************************************************************************/
 /*                                                                           */
+/*  Glyph-outline callback shims.  svg_glyph_emit_outline (z53_glyph.c)      */
+/*  walks one Type 1 charstring and feeds the absolute path coordinates back */
+/*  through these.  The void* ctx is reinterpreted as an svg_ps_state*.      */
+/*                                                                           */
+/*****************************************************************************/
+
+static void svg_charpath_cb_move(void *u, double x, double y)
+{ svg_ps_moveto((svg_ps_state *) u, x, y); }
+
+static void svg_charpath_cb_line(void *u, double x, double y)
+{ svg_ps_lineto((svg_ps_state *) u, x, y); }
+
+static void svg_charpath_cb_curve(void *u,
+  double x1, double y1, double x2, double y2, double x3, double y3)
+{ svg_ps_curveto((svg_ps_state *) u, x1, y1, x2, y2, x3, y3); }
+
+static void svg_charpath_cb_close(void *u)
+{ svg_ps_closepath((svg_ps_state *) u); }
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  ASCII byte (StandardEncoding) -> Adobe glyph name.  Covers letters,     */
+/*  digits, and the usual punctuation used by `charpath` consumers.  Other   */
+/*  bytes return NULL and the caller falls back to a bbox rectangle for     */
+/*  that one character.                                                     */
+/*                                                                           */
+/*****************************************************************************/
+
+static const char *svg_ascii_glyph_name(unsigned int c)
+{
+  static const char *letters[26] = {
+    "A","B","C","D","E","F","G","H","I","J","K","L","M",
+    "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"
+  };
+  static const char *small[26] = {
+    "a","b","c","d","e","f","g","h","i","j","k","l","m",
+    "n","o","p","q","r","s","t","u","v","w","x","y","z"
+  };
+  static const char *digits[10] = {
+    "zero","one","two","three","four","five","six","seven","eight","nine"
+  };
+  if( c >= 'A' && c <= 'Z' ) return letters[c - 'A'];
+  if( c >= 'a' && c <= 'z' ) return small[c - 'a'];
+  if( c >= '0' && c <= '9' ) return digits[c - '0'];
+  switch( c )
+  {
+    case ' ': return "space";
+    case '!': return "exclam";
+    case '"': return "quotedbl";
+    case '#': return "numbersign";
+    case '$': return "dollar";
+    case '%': return "percent";
+    case '&': return "ampersand";
+    case '\'': return "quoteright";
+    case '(': return "parenleft";
+    case ')': return "parenright";
+    case '*': return "asterisk";
+    case '+': return "plus";
+    case ',': return "comma";
+    case '-': return "hyphen";
+    case '.': return "period";
+    case '/': return "slash";
+    case ':': return "colon";
+    case ';': return "semicolon";
+    case '<': return "less";
+    case '=': return "equal";
+    case '>': return "greater";
+    case '?': return "question";
+    case '@': return "at";
+    case '[': return "bracketleft";
+    case '\\': return "backslash";
+    case ']': return "bracketright";
+    case '^': return "asciicircum";
+    case '_': return "underscore";
+    case '`': return "quoteleft";
+    case '{': return "braceleft";
+    case '|': return "bar";
+    case '}': return "braceright";
+    case '~': return "asciitilde";
+    default:  return NULL;
+  }
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  svg_ps_arc - PostScript "x y r a1 a2 arc" / "arcn".                      */
 /*                                                                           */
 /*  Approximates the arc by a sequence of SVG A (elliptical arc) segments.   */
@@ -2935,6 +3039,7 @@ static void svg_ps_show(svg_ps_state *s, const char *str)
   const char *p;
   unsigned int c;
   double xp, yp, size_pt;
+  double x0p, y0p, x1p, y1p, dx, dy, angle_deg;
   int is_bold, is_italic;
   const char *fname;
   const char *col;
@@ -2949,6 +3054,20 @@ static void svg_ps_show(svg_ps_state *s, const char *str)
   /* svg_ps_moveto does, so the text aligns with the surrounding path        */
   /* coordinate system (i.e. inside the <g> chain mirroring the outer CTM). */
   svg_ps_xform_pt(s, s->cur_x, s->cur_y, &xp, &yp);
+
+  /* Recover any path-delta rotation by probing the local x-axis direction. */
+  /* PS code like `translate N rotate moveto show` (e.g. ldiagshowtags in   */
+  /* diagf.lpg, and any @Diag link-label that uses linklabelangle) rotates */
+  /* the coordinate frame before show; without applying that rotation here */
+  /* the text renders upright at the rotated origin rather than along the  */
+  /* rotated x-axis.  The angle is atan2(dy, dx) over the image of (PT,0). */
+  /* Inside the page-level Y-flip group, SVG rotate() agrees with PS       */
+  /* rotate() in sign, so no negation is needed.                            */
+  svg_ps_xform_pt(s, 0.0, 0.0, &x0p, &y0p);
+  svg_ps_xform_pt(s, (double) PT, 0.0, &x1p, &y1p);
+  dx = x1p - x0p;
+  dy = y1p - y0p;
+  angle_deg = (dx*dx + dy*dy > 1e-12) ? atan2(dy, dx) * 180.0 / SVG_PI : 0.0;
 
   /* font_size is in internal units (e.g. 8 pt -> 160).  The path-coord      */
   /* frame is points (PT == 20 internal units per point).                    */
@@ -2966,9 +3085,16 @@ static void svg_ps_show(svg_ps_state *s, const char *str)
         (g->stroke_rgb[0] != '\0' ? g->stroke_rgb : NULL);
 
   /* Counter-flip wrapper so glyphs are upright inside the page-level Y-     */
-  /* flip group.  This mirrors SVG_PrintWord exactly.                        */
-  fprintf(out_fp,
-    "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">", xp, yp);
+  /* flip group, with an optional rotate() if the path-delta carries one.   */
+  /* Rotate sits before scale(1,-1) so it's interpreted in the bottom-left  */
+  /* frame (CCW positive, matching PS).                                      */
+  if( fabs(angle_deg) > 0.01 )
+    fprintf(out_fp,
+      "<g transform=\"translate(%.3f,%.3f) rotate(%.3f) scale(1,-1)\">",
+      xp, yp, angle_deg);
+  else
+    fprintf(out_fp,
+      "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">", xp, yp);
   fprintf(out_fp,
     "<text x=\"0\" y=\"0\" font-family=\"%s\" font-size=\"%.3f\"",
     fname, size_pt);
@@ -3745,40 +3871,63 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   {
     /* <string> <bool> charpath -- append the string's outline to the      */
     /* current path so a subsequent fill/stroke renders text as paths.     */
-    /* Approximate: one axis-aligned bounding-box rectangle per character, */
-    /* using the same 0.5 em fixed-pitch advancement that svg_ps_show /    */
-    /* stringwidth use elsewhere in this back end (font-metric matching at */
-    /* the rasteriser is documented out-of-scope -- see NEXT_OPTIMIZATIONS */
-    /* "Not included").  Real Type 1 glyph outlines would require parsing  */
-    /* the AFM/OTF tables; the bbox fallback is enough for the @Diag /     */
-    /* @Graph prologue paths that use charpath as a hit-test region.       */
+    /*                                                                     */
+    /* Real outline path: for each byte, map StandardEncoding -> glyph     */
+    /* name and ask svg_glyph_emit_outline (z53_glyph.c) to walk the Type  */
+    /* 1 charstring through the path accumulator.  The outline service    */
+    /* honours an optional LOUT_T1_FONT_DIR env var and falls back to a   */
+    /* hardcoded list of system .pfb search dirs; if it can't find the    */
+    /* font, or the glyph name isn't in the font's CharStrings dict, the  */
+    /* per-character fallback is the original bbox rectangle (0.5 em wide */
+    /* x 1.0 em tall).  coltex's `charpath flattenpath pathbbox` consumer */
+    /* sees a bbox of the same plausible shape either way -- only the    */
+    /* inside-the-rectangle path data changes.                            */
     svg_value vb_local = svg_ps_pop_value(s);  /* bool (true=stroke flag) */
     svg_value vs_local = svg_ps_pop_value(s);  /* string                  */
     double fs = s->gs[s->gs_top].font_size;
-    double adv = fs * 0.5;           /* per-char advance, matches show()  */
-    double asc = fs * 0.8;           /* ascent above baseline, approx     */
-    double desc = fs * 0.2;          /* descent below baseline, approx    */
-    double x0 = s->cur_x;
+    double adv_default = fs * 0.5;   /* fallback advance per char         */
+    double asc = fs * 0.8;           /* ascent above baseline (fallback)  */
+    double desc = fs * 0.2;          /* descent below baseline (fallback) */
+    double cx = s->cur_x;
     double y0 = s->cur_y;
     int i, n;
+    const char *fname;
     (void) vb_local;
+    fname = s->gs[s->gs_top].font_name[0] != '\0'
+              ? s->gs[s->gs_top].font_name : "Times-Roman";
     if( vs_local.kind == SVG_VK_STRING && vs_local.name != NULL )
     {
       n = (int) strlen(vs_local.name);
       for( i = 0; i < n; i++ )
       {
-        double cx = x0 + (double) i * adv;
-        /* rectangle subpath: left-bottom, right-bottom, right-top,        */
-        /* left-top, closepath.  Lays out a clean approximate outline.    */
-        svg_ps_moveto(s, cx,         y0 - desc);
-        svg_ps_lineto(s, cx + adv,   y0 - desc);
-        svg_ps_lineto(s, cx + adv,   y0 + asc);
-        svg_ps_lineto(s, cx,         y0 + asc);
-        svg_ps_closepath(s);
+        unsigned int c = (unsigned int) (unsigned char) vs_local.name[i];
+        const char *gname = svg_ascii_glyph_name(c);
+        double adv = adv_default;
+        double adv_real = 0.0;
+        int got = 0;
+        if( gname != NULL )
+          got = svg_glyph_emit_outline(fname, gname, fs, cx, y0, &adv_real,
+            (void *) s,
+            svg_charpath_cb_move, svg_charpath_cb_line,
+            svg_charpath_cb_curve, svg_charpath_cb_close);
+        if( got )
+        {
+          if( adv_real > 0.0 ) adv = adv_real;
+        }
+        else
+        {
+          /* fallback: bbox rectangle */
+          svg_ps_moveto(s, cx,         y0 - desc);
+          svg_ps_lineto(s, cx + adv,   y0 - desc);
+          svg_ps_lineto(s, cx + adv,   y0 + asc);
+          svg_ps_lineto(s, cx,         y0 + asc);
+          svg_ps_closepath(s);
+        }
+        cx += adv;
       }
       /* Advance the current point past the string (PS charpath leaves   */
       /* the CP at the end of the last glyph, mirroring show).            */
-      svg_ps_moveto(s, x0 + (double) n * adv, y0);
+      svg_ps_moveto(s, cx, y0);
     }
     return 1;
   }

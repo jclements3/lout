@@ -91,37 +91,47 @@ the underlying mechanism is well-understood and the fix is short.
 
 ---
 
-## 3. Real OTF / Type1 outline parsing in `z37.c` -> `charpath`
+## 3. Real OTF / Type1 outline parsing -> `charpath` (LANDED 2026-05-22)
 
-Description: commit `2a33e3d`'s charpath bbox approximation -- a
-single axis-aligned rectangle per character, `fs*0.5` wide,
-`fs*0.8` ascent, `fs*0.2` descent -- is sufficient for the only
-in-tree consumer (`include/coltex`'s `charpath flattenpath
-pathbbox` sequence).  But user-authored `@Graphic` that does
-proper text-as-shape work (e.g. outline-stroked headings, text-on-
-path) gets a chunky rectangle instead of glyph outlines.
+Status: implemented.  `SVG_OP_CHARPATH` now consults a new module
+`z53_glyph.c` that loads the system URW++ Type 1 `.pfb` outline for
+the active PostScript font name (Times-*, Helvetica-*, Courier-*,
+Symbol, ZapfDingbats, ZapfChancery, Bookman-*, NewCenturySchlbk-*,
+AvantGarde-*, Palatino-*), decrypts the eexec body, parses the
+`/Subrs` array and `/CharStrings` dict, and runs the Type 1
+charstring per character through the path accumulator's existing
+`svg_ps_moveto / _lineto / _curveto / _closepath` helpers.
 
-Fix: extend `z37.c` (font service) with a per-font outline cache
-fed by the AFM/Type1/OTF font files in `lout/font/`, and have
-`SVG_OP_CHARPATH` request real glyph outlines instead of bboxes.
+When the font (or one of its glyphs) can't be located the per-
+character fallback is the original 0.5 em x 1.0 em bbox rectangle,
+so `coltex`'s `charpath flattenpath pathbbox` consumer continues to
+see a plausible bbox.  Environment override:
+`LOUT_T1_FONT_DIR=<dir>` prepends a search dir for the `.pfb`
+file; `LOUT_NO_GLYPH_OUTLINES=1` disables the new path entirely.
 
-Impact: completeness.  Closes a deferred item from the bbox-
-approximation work.  Mostly latent demand -- no current user
-documents need this -- so the fix is here mainly to avoid future
-surprise when a user writes outline-text @Graphic.
+Implementation footprint: ~750 LOC in `z53_glyph.c` (PFB segment
+unwrap; eexec + charstring RC4-variant decryption; Type 1
+charstring interpreter with `hsbw / sbw / rmoveto / hmoveto /
+vmoveto / rlineto / hlineto / vlineto / rrcurveto / vhcurveto /
+hvcurveto / closepath / callsubr / return / endchar / seac / div /
+callothersubr / pop / dotsection / hstem / vstem` and the `flex`
+family).  Plus ~80 LOC of ASCII-to-glyph-name mapping and four
+callback shims in `z53.c`.
 
-Complexity: large (~500-1500 LOC).  Real OTF/Type1 outline parsing
-is non-trivial; if pursued, recommend using FreeType (if a build
-dependency is acceptable) or a small in-tree CFF/TrueType reader.
+Out-of-scope follow-ups (left for a future round):
+  - CFF / OTF outline support for fonts that ship only as `.otf`
+    (would let users pick fonts outside the base-35 set).  Right
+    now arbitrary user-defined fonts fall back to the bbox.
+  - Honouring the active LCM for non-Latin1 character encodings
+    inside `charpath` (the operand is whatever bytes the PS source
+    pushed, with no FONT_NUM in scope; we use Adobe
+    StandardEncoding glyph names as a coarse approximation).
 
-Observable: write a 2-line `@Graphic` with `gsave (Hello) charpath
-stroke grestore`; before, get a rectangle outline; after, get a
-glyph-outlined "Hello".
+Touches: `z53.c` + new `z53_glyph.c` + `makefile`.  No
+`include/` changes; the PostScript back end (`z49.c`) is
+untouched.
 
-Touches: `z37.c` + `z53.c`.  External dependency choice required.
-
-Rank: #3.  Deferred deliberately; flagged here so future agents
-don't re-deduce the deferral.
+Rank: closed.
 
 ---
 
@@ -195,7 +205,7 @@ Rank: #5.  No action item today; tracked for awareness.
 |----|----------------------------------------------|--------------|-----------------|------------------------------------|
 | 1  | Symbol-font glyph table extension            | small-medium | correctness     | Single biggest user-visible gap    |
 | 2  | symbolsize tracking for @Graph paint procs   | small        | correctness     | Edge case; mechanism understood    |
-| 3  | Real OTF/Type1 outline parsing -> charpath   | large        | completeness    | Deferred from `2a33e3d`            |
+| 3  | Real OTF/Type1 outline parsing -> charpath   | large        | completeness    | LANDED 2026-05-22 via `z53_glyph.c`|
 | 4  | More aggressive raw-PS -> SVG translation    | medium       | completeness    | Closes XML-comment fallback        |
 | 5  | SVG_NullBackEnd refinements                  | small        | correctness     | No action; tracked for awareness   |
 

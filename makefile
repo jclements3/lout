@@ -372,7 +372,7 @@ OBJS	= z01.o z02.o z03.o z04.o z05.o z06.o z07.o z08.o	\
 	  z25.o z26.o z27.o z28.o z29.o z30.o z31.o z32.o	\
 	  z33.o z34.o z35.o z36.o z37.o z38.o z39.o z40.o	\
 	  z41.o z42.o z43.o z44.o z45.o z46.o z47.o z48.o	\
-	  z49.o z50.o z51.o z52.o z53.o
+	  z49.o z50.o z51.o z52.o z53.o z53_glyph.o
 
 .PHONY: all install installman installdoc allinstall installfr installde uninstall test testclean clean gitclean gitcleanforce restart
 
