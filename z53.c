@@ -996,6 +996,13 @@ typedef struct svg_gstate {
   /* plain colour.  Copied by gsave/restored by grestore via the       */
   /* struct-copy/pop pair, exactly like fill_rgb.                       */
   int    texture_kind;
+  /* Active font state for the `show` operator.  Tracks the most-recent  */
+  /* /Name findfont (font_name) and the most-recent scalefont scalar    */
+  /* (font_size).  setfont activates a font dict but in our minimal    */
+  /* model the dict is opaque, so the gstate just carries the name/size */
+  /* directly.  Both fields are copied by gsave / restored by grestore. */
+  char   font_name[64];
+  double font_size;             /* in internal units (multiples of PT)  */
 } svg_gstate;
 
 /* Named textures recognised by the proc-body scanner inside              */
@@ -1698,6 +1705,10 @@ static void svg_ps_init(svg_ps_state *s)
   s->gs[0].baseline_m[4] = 0.0; s->gs[0].baseline_m[5] = 0.0;
   s->gs[0].clip_empty = 0;
   s->gs[0].texture_kind = SVG_TEX_SOLID;
+  /* Default active font: Times-Roman 10pt (in internal units).  Any   */
+  /* findfont/scalefont/setfont sequence in the prologue will override.*/
+  strcpy(s->gs[0].font_name, "Times-Roman");
+  s->gs[0].font_size = 10.0 * (double) PT;
   /* svg_var_* persist across SVG_PrintGraphicObject calls (PS userdict     */
   /* semantics); they are initialised once by svg_psinterp_init.            */
   s->path[0] = '\0';
@@ -2631,6 +2642,82 @@ static void svg_collect_to_mark(svg_ps_state *s, svg_value *out)
 
 /*****************************************************************************/
 /*                                                                           */
+/*  svg_ps_show - emit a <text> element rendering the byte-string `str` at   */
+/*  the current point in the active font.  The string is byte-iterated;     */
+/*  bytes >= 0x80 are passed through as Latin-1 -> UTF-8 (sufficient for     */
+/*  the ASCII numeric tick labels produced by @Graph and the literal strings */
+/*  found in @Diag/Fig labels).  Advances cur_x by an approximate width      */
+/*  (0.5 em per char) so subsequent rmoveto sequences land in the right     */
+/*  ballpark.                                                                */
+/*                                                                           */
+/*****************************************************************************/
+
+static void svg_ps_show(svg_ps_state *s, const char *str)
+{
+  svg_gstate *g;
+  const char *p;
+  unsigned int c;
+  double xp, yp, size_pt;
+  int is_bold, is_italic;
+  const char *fname;
+  const char *col;
+
+  if( out_fp == NULL || str == NULL || str[0] == '\0' )
+    return;
+  g = &s->gs[s->gs_top];
+  if( g->clip_empty )
+    return;
+
+  /* Convert the current point through the path-delta in the same way        */
+  /* svg_ps_moveto does, so the text aligns with the surrounding path        */
+  /* coordinate system (i.e. inside the <g> chain mirroring the outer CTM). */
+  svg_ps_xform_pt(s, s->cur_x, s->cur_y, &xp, &yp);
+
+  /* font_size is in internal units (e.g. 8 pt -> 160).  The path-coord      */
+  /* frame is points (PT == 20 internal units per point).                    */
+  size_pt = g->font_size / (double) PT;
+  if( size_pt <= 0.0 ) size_pt = 10.0;
+
+  fname = g->font_name[0] != '\0' ? g->font_name : "Times-Roman";
+  /* Heuristic Bold/Italic detection from the font name.                     */
+  is_bold = (strstr(fname, "Bold") != NULL);
+  is_italic = (strstr(fname, "Italic") != NULL ||
+               strstr(fname, "Oblique") != NULL ||
+               strstr(fname, "Slope")  != NULL);
+
+  col = g->fill_rgb[0] != '\0' ? g->fill_rgb :
+        (g->stroke_rgb[0] != '\0' ? g->stroke_rgb : NULL);
+
+  /* Counter-flip wrapper so glyphs are upright inside the page-level Y-     */
+  /* flip group.  This mirrors SVG_PrintWord exactly.                        */
+  fprintf(out_fp,
+    "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">", xp, yp);
+  fprintf(out_fp,
+    "<text x=\"0\" y=\"0\" font-family=\"%s\" font-size=\"%.3f\"",
+    fname, size_pt);
+  if( is_bold )
+    fputs(" font-weight=\"bold\"", out_fp);
+  if( is_italic )
+    fputs(" font-style=\"italic\"", out_fp);
+  if( col != NULL )
+    fprintf(out_fp, " fill=\"%s\"", col);
+  fputc('>', out_fp);
+  for( p = str; *p != '\0'; p++ )
+  {
+    c = (unsigned int) (unsigned char) *p;
+    svg_emit_utf8(c);
+  }
+  fputs("</text></g>\n", out_fp);
+
+  /* Advance the current point by an approximate string width so subsequent  */
+  /* `rmoveto` / show sequences in the prologue land in the right ballpark.  */
+  /* 0.5 em per char is a coarse but adequate fixed-pitch approximation.     */
+  s->cur_x += (double) strlen(str) * g->font_size * 0.5;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  svg_ps_exec_op - look up `name` as a built-in operator and execute it.   */
 /*  Returns 1 if handled, 0 if not.                                          */
 /*                                                                           */
@@ -3041,18 +3128,8 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push_num(s, s->cur_y);
     return 1;
   }
-  if( strcmp(name, "clip") == 0 || strcmp(name, "showpage") == 0 ||
-      strcmp(name, "show") == 0 || strcmp(name, "stringwidth") == 0 ||
-      strcmp(name, "charpath") == 0 )
+  if( strcmp(name, "clip") == 0 || strcmp(name, "showpage") == 0 )
   {
-    if( strcmp(name, "show") == 0 || strcmp(name, "charpath") == 0 )
-      (void) svg_ps_pop_value(s);
-    if( strcmp(name, "stringwidth") == 0 )
-    {
-      (void) svg_ps_pop_value(s);
-      svg_ps_push_num(s, 0.0);
-      svg_ps_push_num(s, 0.0);
-    }
     /* Clipping with an empty current path masks all subsequent drawing in   */
     /* this gstate (and its gsave-descendants) until the matching grestore. */
     /* The @Diag prologue uses `newpath clip gsave` to suppress unwanted    */
@@ -3061,6 +3138,92 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     /* emit primitive then drops paths drawn while the flag is set.        */
     if( strcmp(name, "clip") == 0 && !s->had_geom )
       s->gs[s->gs_top].clip_empty = 1;
+    return 1;
+  }
+  if( strcmp(name, "show") == 0 )
+  {
+    /* <string> show -- render at the current point in the active font.    */
+    svg_value v = svg_ps_pop_value(s);
+    if( v.kind == SVG_VK_STRING && v.name != NULL )
+      svg_ps_show(s, v.name);
+    return 1;
+  }
+  if( strcmp(name, "stringwidth") == 0 )
+  {
+    /* Fixed-pitch approximation: width = strlen * (font_size * 0.5).      */
+    /* Adequate for the few prologue paths (e.g. expstringshow's centring) */
+    /* that consult the width before invoking show.                        */
+    svg_value v = svg_ps_pop_value(s);
+    double w = 0.0;
+    if( v.kind == SVG_VK_STRING && v.name != NULL )
+      w = (double) strlen(v.name) * s->gs[s->gs_top].font_size * 0.5;
+    svg_ps_push_num(s, w);
+    svg_ps_push_num(s, 0.0);
+    return 1;
+  }
+  if( strcmp(name, "charpath") == 0 )
+  {
+    /* <string> <bool> charpath -- approximate the string's outline.       */
+    /* No-op cleanly: drop both operands.  Outline-as-path is too costly   */
+    /* to implement here; the prologues that use this fall back gracefully. */
+    (void) svg_ps_pop_value(s);  /* bool */
+    (void) svg_ps_pop_value(s);  /* string */
+    return 1;
+  }
+  if( strcmp(name, "findfont") == 0 )
+  {
+    /* <name> findfont -- record name as the active font and push a dict.  */
+    svg_value v = svg_ps_pop_value(s);
+    svg_value out;
+    if( (v.kind == SVG_VK_LITNAME || v.kind == SVG_VK_NAME ||
+         v.kind == SVG_VK_STRING) && v.name != NULL )
+    {
+      size_t n = strlen(v.name);
+      if( n >= sizeof s->gs[s->gs_top].font_name )
+        n = sizeof s->gs[s->gs_top].font_name - 1;
+      memcpy(s->gs[s->gs_top].font_name, v.name, n);
+      s->gs[s->gs_top].font_name[n] = '\0';
+    }
+    /* Push a stand-in dict value (the setfont/scalefont path is opaque so  */
+    /* the dict identity does not matter -- the gstate carries the real    */
+    /* font state).                                                         */
+    out.kind = SVG_VK_DICT;
+    out.num = 0.0;
+    out.name = NULL;
+    out.items = NULL;
+    out.nitems = 0;
+    out.dict_id = 0;
+    svg_ps_push(s, &out);
+    return 1;
+  }
+  if( strcmp(name, "scalefont") == 0 )
+  {
+    /* <fontdict> <scalar> scalefont <fontdict'> -- record scalar as size. */
+    double sz = svg_ps_pop(s);
+    /* leave the font dict on top of the stack untouched */
+    s->gs[s->gs_top].font_size = sz;
+    return 1;
+  }
+  if( strcmp(name, "setfont") == 0 )
+  {
+    /* <fontdict> setfont -- consumes the dict.  The gstate already        */
+    /* carries the active font name/size set by findfont/scalefont.        */
+    (void) svg_ps_pop_value(s);
+    return 1;
+  }
+  if( strcmp(name, "currentfont") == 0 )
+  {
+    /* Push a stub font-dict value.  Used by `gsave currentfont 0.7        */
+    /* scalefont setfont ... grestore` in graphf's exponent rendering --   */
+    /* the dict identity is opaque, scalefont rebinds the gstate size.     */
+    svg_value out;
+    out.kind = SVG_VK_DICT;
+    out.num = 0.0;
+    out.name = NULL;
+    out.items = NULL;
+    out.nitems = 0;
+    out.dict_id = 0;
+    svg_ps_push(s, &out);
     return 1;
   }
 
