@@ -1291,19 +1291,11 @@ def @BasicSetup
 	    else @Yield { "/Keywords ("keywords")" } }
 	  "/DOCINFO pdfmark"
 	}
-	SVG        @Yield
-	{
-	  "[" author @Case {
-	    "" @Yield ""
-	    else @Yield { "/Author ("author")" } }
-	  title @Case {
-	    "" @Yield ""
-	    else @Yield { "/Title ("title")" } }
-	  keywords @Case {
-	    "" @Yield ""
-	    else @Yield { "/Keywords ("keywords")" } }
-	  "/DOCINFO pdfmark"
-	}
+	# SVG override: SVG has no analogue of PS's /DOCINFO pdfmark
+	# (document author/title/keywords go nowhere in an SVG viewer), so
+	# emit nothing rather than dumping unmatched-bracket pdfmark code
+	# into the page graphics stream.
+	SVG        @Yield @Null
 	else @Yield @Null
       } } @Graphic { }
     }
