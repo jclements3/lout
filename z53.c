@@ -444,6 +444,248 @@ static const struct svg_glyph_map svg_glyph_table[] = {
   /* Misc */
   { "nbspace",        0x00A0 },
   { "softhyphen",     0x00AD },
+
+  /* ================================================================== */
+  /* Adobe Symbol font (Symb.LCM): Greek letters, mathematical / set /  */
+  /* logic operators, arrows, fences, and miscellaneous symbols.  Code  */
+  /* points follow Adobe's published "Symbol" character set (the same  */
+  /* mapping used by Adobe's symbol-glyph list and PDF text extraction). */
+  /* ================================================================== */
+
+  /* Greek upper case */
+  { "Alpha",          0x0391 },
+  { "Beta",           0x0392 },
+  { "Gamma",          0x0393 },
+  { "Delta",          0x0394 },
+  { "Epsilon",        0x0395 },
+  { "Zeta",           0x0396 },
+  { "Eta",            0x0397 },
+  { "Theta",          0x0398 },
+  { "Iota",           0x0399 },
+  { "Kappa",          0x039A },
+  { "Lambda",         0x039B },
+  { "Mu",             0x039C },
+  { "Nu",             0x039D },
+  { "Xi",             0x039E },
+  { "Omicron",        0x039F },
+  { "Pi",             0x03A0 },
+  { "Rho",            0x03A1 },
+  { "Sigma",          0x03A3 },
+  { "Tau",            0x03A4 },
+  { "Upsilon",        0x03A5 },
+  { "Phi",            0x03A6 },
+  { "Chi",            0x03A7 },
+  { "Psi",            0x03A8 },
+  { "Omega",          0x03A9 },
+  /* Greek lower case */
+  { "alpha",          0x03B1 },
+  { "beta",           0x03B2 },
+  { "gamma",          0x03B3 },
+  { "delta",          0x03B4 },
+  { "epsilon",        0x03B5 },
+  { "zeta",           0x03B6 },
+  { "eta",            0x03B7 },
+  { "theta",          0x03B8 },
+  { "iota",           0x03B9 },
+  { "kappa",          0x03BA },
+  { "lambda",         0x03BB },
+  /* "mu" already mapped above as 0x00B5 (micro sign); Adobe Symbol     */
+  /* expects U+03BC (Greek small letter mu) at code 0x6D.  Both glyphs  */
+  /* look identical; we keep the existing 0x00B5 entry to avoid breaking */
+  /* the Latin-1 mu and let Symb mu fall through to the same binding.    */
+  { "nu",             0x03BD },
+  { "xi",             0x03BE },
+  { "omicron",        0x03BF },
+  { "pi",             0x03C0 },
+  { "rho",            0x03C1 },
+  { "sigma",          0x03C3 },
+  { "tau",            0x03C4 },
+  { "upsilon",        0x03C5 },
+  { "phi",            0x03C6 },
+  { "chi",            0x03C7 },
+  { "psi",            0x03C8 },
+  { "omega",          0x03C9 },
+  /* Greek variants used by Symbol font */
+  { "theta1",         0x03D1 },  /* GREEK THETA SYMBOL */
+  { "phi1",           0x03D5 },  /* GREEK PHI SYMBOL   */
+  { "sigma1",         0x03C2 },  /* GREEK SMALL LETTER FINAL SIGMA */
+  { "omega1",         0x03D6 },  /* GREEK PI SYMBOL (Adobe's "omega1") */
+  { "Upsilon1",       0x03D2 },  /* GREEK UPSILON WITH HOOK SYMBOL */
+
+  /* Mathematical operators */
+  { "universal",      0x2200 },  /* FOR ALL */
+  { "existential",    0x2203 },  /* THERE EXISTS */
+  { "suchthat",       0x220B },  /* CONTAINS AS MEMBER */
+  { "asteriskmath",   0x2217 },  /* ASTERISK OPERATOR */
+  { "congruent",      0x2245 },  /* APPROXIMATELY EQUAL TO */
+  { "therefore",      0x2234 },  /* THEREFORE */
+  { "perpendicular",  0x22A5 },  /* UP TACK */
+  { "radicalex",      0x203E },  /* OVERLINE (radical extension) */
+  { "minute",         0x2032 },  /* PRIME */
+  { "second",         0x2033 },  /* DOUBLE PRIME */
+  { "lessequal",      0x2264 },  /* LESS-THAN OR EQUAL TO */
+  { "greaterequal",   0x2265 },  /* GREATER-THAN OR EQUAL TO */
+  { "infinity",       0x221E },  /* INFINITY */
+  { "notequal",       0x2260 },  /* NOT EQUAL TO */
+  { "approxequal",    0x2248 },  /* ALMOST EQUAL TO */
+  { "equivalence",    0x2261 },  /* IDENTICAL TO */
+  { "proportional",   0x221D },  /* PROPORTIONAL TO */
+  { "partialdiff",    0x2202 },  /* PARTIAL DIFFERENTIAL */
+  { "similar",        0x223C },  /* TILDE OPERATOR */
+  { "aleph",          0x2135 },  /* ALEF SYMBOL */
+  { "Ifraktur",       0x2111 },  /* BLACK-LETTER CAPITAL I */
+  { "Rfraktur",       0x211C },  /* BLACK-LETTER CAPITAL R */
+  { "weierstrass",    0x2118 },  /* SCRIPT CAPITAL P (Weierstrass p) */
+  { "emptyset",       0x2205 },  /* EMPTY SET */
+  { "gradient",       0x2207 },  /* NABLA */
+  { "product",        0x220F },  /* N-ARY PRODUCT */
+  { "summation",      0x2211 },  /* N-ARY SUMMATION */
+  { "integral",       0x222B },  /* INTEGRAL */
+  { "dotmath",        0x22C5 },  /* DOT OPERATOR */
+  { "radical",        0x221A },  /* SQUARE ROOT */
+  { "lozenge",        0x25CA },  /* LOZENGE */
+  { "angle",          0x2220 },  /* ANGLE */
+  /* angleleft / angleright are the math-bra fences used in symbol font */
+  { "angleleft",      0x27E8 },  /* MATHEMATICAL LEFT ANGLE BRACKET */
+  { "angleright",     0x27E9 },  /* MATHEMATICAL RIGHT ANGLE BRACKET */
+
+  /* Set and logic operators */
+  { "element",        0x2208 },  /* ELEMENT OF */
+  { "notelement",     0x2209 },  /* NOT AN ELEMENT OF */
+  { "intersection",   0x2229 },  /* INTERSECTION */
+  { "union",          0x222A },  /* UNION */
+  { "propersubset",   0x2282 },  /* SUBSET OF */
+  { "propersuperset", 0x2283 },  /* SUPERSET OF */
+  { "reflexsubset",   0x2286 },  /* SUBSET OF OR EQUAL TO */
+  { "reflexsuperset", 0x2287 },  /* SUPERSET OF OR EQUAL TO */
+  { "notsubset",      0x2284 },  /* NOT A SUBSET OF */
+  { "logicaland",     0x2227 },  /* LOGICAL AND */
+  { "logicalor",      0x2228 },  /* LOGICAL OR */
+  { "circleplus",     0x2295 },  /* CIRCLED PLUS */
+  { "circlemultiply", 0x2297 },  /* CIRCLED TIMES */
+
+  /* Arrows */
+  { "arrowleft",      0x2190 },  /* LEFTWARDS ARROW */
+  { "arrowup",        0x2191 },  /* UPWARDS ARROW */
+  { "arrowright",     0x2192 },  /* RIGHTWARDS ARROW */
+  { "arrowdown",      0x2193 },  /* DOWNWARDS ARROW */
+  { "arrowboth",      0x2194 },  /* LEFT RIGHT ARROW */
+  { "arrowdblleft",   0x21D0 },  /* LEFTWARDS DOUBLE ARROW */
+  { "arrowdblup",     0x21D1 },  /* UPWARDS DOUBLE ARROW */
+  { "arrowdblright",  0x21D2 },  /* RIGHTWARDS DOUBLE ARROW */
+  { "arrowdbldown",   0x21D3 },  /* DOWNWARDS DOUBLE ARROW */
+  { "arrowdblboth",   0x21D4 },  /* LEFT RIGHT DOUBLE ARROW */
+  /* Arrow body extensions (used by Symbol for tall arrows); the */
+  /* vertical/horizontal "ex" pieces don't have dedicated Unicode  */
+  /* points -- approximate with box-drawing verticals/horizontals.  */
+  { "arrowvertex",    0x23D0 },  /* VERTICAL LINE EXTENSION (arrow body) */
+  { "arrowhorizex",   0x23AF },  /* HORIZONTAL LINE EXTENSION */
+
+  /* Card suits and miscellany */
+  { "club",           0x2663 },
+  { "diamond",        0x2666 },  /* (note: also matched by Symbol-font users) */
+  { "heart",          0x2665 },
+  { "spade",          0x2660 },
+  { "carriagereturn", 0x21B5 },  /* DOWNWARDS ARROW WITH CORNER LEFTWARDS */
+
+  /* Stretched / tall fences (multi-glyph: top/middle/bottom variants).      */
+  /* Unicode encodes these as the "bracket pieces" U+239B..U+23AE; map each */
+  /* Adobe variant to its canonical piece so KaTeX/text renderers can lay   */
+  /* out big delimiters when the font is set to Symbol.                     */
+  { "parenlefttp",    0x239B },
+  { "parenleftex",    0x239C },
+  { "parenleftbt",    0x239D },
+  { "parenrighttp",   0x239E },
+  { "parenrightex",   0x239F },
+  { "parenrightbt",   0x23A0 },
+  { "bracketlefttp",  0x23A1 },
+  { "bracketleftex",  0x23A2 },
+  { "bracketleftbt",  0x23A3 },
+  { "bracketrighttp", 0x23A4 },
+  { "bracketrightex", 0x23A5 },
+  { "bracketrightbt", 0x23A6 },
+  { "bracelefttp",    0x23A7 },
+  { "braceleftmid",   0x23A8 },
+  { "braceleftbt",    0x23A9 },
+  { "bracerighttp",   0x23AB },
+  { "bracerightmid",  0x23AC },
+  { "bracerightbt",   0x23AD },
+  { "braceex",        0x23AA },
+  { "integraltp",     0x2320 },  /* TOP HALF INTEGRAL */
+  { "integralex",     0x23AE },  /* INTEGRAL EXTENSION */
+  { "integralbt",     0x2321 },  /* BOTTOM HALF INTEGRAL */
+
+  /* ================================================================== */
+  /* Adobe Zapf Dingbats (Ding.LCM): glyph names a1..a206 map into the   */
+  /* Unicode "Dingbats" block U+2700..U+27BF.  The names below follow    */
+  /* the Adobe Glyph List for the Zapf Dingbats font; codepoints come   */
+  /* from Unicode 6.0's official ITC Zapf Dingbats mapping.              */
+  /* Only names that appear in lout/maps/Ding.LCM are listed.            */
+  /* ================================================================== */
+  { "a1",   0x2701 }, { "a2",   0x2702 }, { "a202", 0x2703 },
+  { "a3",   0x2704 }, { "a4",   0x260E }, { "a5",   0x2706 },
+  { "a119", 0x2707 }, { "a118", 0x2708 }, { "a117", 0x2709 },
+  { "a11",  0x261B }, { "a12",  0x261E }, { "a13",  0x270C },
+  { "a14",  0x270D }, { "a15",  0x270E }, { "a16",  0x270F },
+  { "a105", 0x2710 }, { "a17",  0x2711 }, { "a18",  0x2712 },
+  { "a19",  0x2713 }, { "a20",  0x2714 }, { "a21",  0x2715 },
+  { "a22",  0x2716 }, { "a23",  0x2717 }, { "a24",  0x2718 },
+  { "a25",  0x2719 }, { "a26",  0x271A }, { "a27",  0x271B },
+  { "a28",  0x271C }, { "a6",   0x271D }, { "a7",   0x271E },
+  { "a8",   0x271F }, { "a9",   0x2720 }, { "a10",  0x2721 },
+  { "a29",  0x2722 }, { "a30",  0x2723 }, { "a31",  0x2724 },
+  { "a32",  0x2725 }, { "a33",  0x2726 }, { "a34",  0x2727 },
+  { "a35",  0x2605 }, { "a36",  0x2729 }, { "a37",  0x272A },
+  { "a38",  0x272B }, { "a39",  0x272C }, { "a40",  0x272D },
+  { "a41",  0x272E }, { "a42",  0x272F }, { "a43",  0x2730 },
+  { "a44",  0x2731 }, { "a45",  0x2732 }, { "a46",  0x2733 },
+  { "a47",  0x2734 }, { "a48",  0x2735 }, { "a49",  0x2736 },
+  { "a50",  0x2737 }, { "a51",  0x2738 }, { "a52",  0x2739 },
+  { "a53",  0x273A }, { "a54",  0x273B }, { "a55",  0x273C },
+  { "a56",  0x273D }, { "a57",  0x273E }, { "a58",  0x273F },
+  { "a59",  0x2740 }, { "a60",  0x2741 }, { "a61",  0x2742 },
+  { "a62",  0x2743 }, { "a63",  0x2744 }, { "a64",  0x2745 },
+  { "a65",  0x2746 }, { "a66",  0x2747 }, { "a67",  0x2748 },
+  { "a68",  0x2749 }, { "a69",  0x274A }, { "a70",  0x274B },
+  { "a71",  0x25CF }, { "a72",  0x274D }, { "a73",  0x25A0 },
+  { "a74",  0x274F }, { "a203", 0x2750 }, { "a75",  0x2751 },
+  { "a204", 0x2752 }, { "a76",  0x25B2 }, { "a77",  0x25BC },
+  { "a78",  0x25C6 }, { "a79",  0x2756 }, { "a81",  0x25D7 },
+  { "a82",  0x2758 }, { "a83",  0x2759 }, { "a84",  0x275A },
+  { "a97",  0x275B }, { "a98",  0x275C }, { "a99",  0x275D },
+  { "a100", 0x275E }, { "a101", 0x2761 }, { "a102", 0x2762 },
+  { "a103", 0x2763 }, { "a104", 0x2764 }, { "a106", 0x2765 },
+  { "a107", 0x2766 }, { "a108", 0x2767 }, { "a112", 0x2663 },
+  { "a111", 0x2666 }, { "a110", 0x2665 }, { "a109", 0x2660 },
+  { "a120", 0x2460 }, { "a121", 0x2461 }, { "a122", 0x2462 },
+  { "a123", 0x2463 }, { "a124", 0x2464 }, { "a125", 0x2465 },
+  { "a126", 0x2466 }, { "a127", 0x2467 }, { "a128", 0x2468 },
+  { "a129", 0x2469 }, { "a130", 0x2776 }, { "a131", 0x2777 },
+  { "a132", 0x2778 }, { "a133", 0x2779 }, { "a134", 0x277A },
+  { "a135", 0x277B }, { "a136", 0x277C }, { "a137", 0x277D },
+  { "a138", 0x277E }, { "a139", 0x277F }, { "a140", 0x2780 },
+  { "a141", 0x2781 }, { "a142", 0x2782 }, { "a143", 0x2783 },
+  { "a144", 0x2784 }, { "a145", 0x2785 }, { "a146", 0x2786 },
+  { "a147", 0x2787 }, { "a148", 0x2788 }, { "a149", 0x2789 },
+  { "a150", 0x278A }, { "a151", 0x278B }, { "a152", 0x278C },
+  { "a153", 0x278D }, { "a154", 0x278E }, { "a155", 0x278F },
+  { "a156", 0x2790 }, { "a157", 0x2791 }, { "a158", 0x2792 },
+  { "a159", 0x2793 }, { "a160", 0x2794 }, { "a161", 0x2192 },
+  { "a163", 0x2194 }, { "a164", 0x2195 }, { "a196", 0x2798 },
+  { "a165", 0x2799 }, { "a192", 0x279A }, { "a166", 0x279B },
+  { "a167", 0x279C }, { "a168", 0x279D }, { "a169", 0x279E },
+  { "a170", 0x279F }, { "a171", 0x27A0 }, { "a172", 0x27A1 },
+  { "a173", 0x27A2 }, { "a162", 0x27A3 }, { "a174", 0x27A4 },
+  { "a175", 0x27A5 }, { "a176", 0x27A6 }, { "a177", 0x27A7 },
+  { "a178", 0x27A8 }, { "a179", 0x27A9 }, { "a193", 0x27AA },
+  { "a180", 0x27AB }, { "a199", 0x27AC }, { "a181", 0x27AD },
+  { "a200", 0x27AE }, { "a182", 0x27AF }, { "a201", 0x27B1 },
+  { "a183", 0x27B2 }, { "a184", 0x27B3 }, { "a197", 0x27B4 },
+  { "a185", 0x27B5 }, { "a194", 0x27B6 }, { "a198", 0x27B7 },
+  { "a186", 0x27B8 }, { "a195", 0x27B9 }, { "a187", 0x27BA },
+  { "a188", 0x27BB }, { "a189", 0x27BC }, { "a190", 0x27BD },
+  { "a191", 0x27BE },
+
   { NULL,             0      }
 };
 
@@ -4382,17 +4624,28 @@ static int svg_ps_exec_symbol(svg_ps_state *s, const char *name,
 {
   double slw, ss, yc, xc;
   int is_do = (strncmp(name, "do", 2) == 0);
-  int outline = 0;
+  int outline;
+  int is_filled;
   const char *shape;
   (void) op_id;  /* the resolved op_id is informational; name carries shape */
   /* All graphf.lpg symbols use an "open" form (square, circle, ...)    */
   /* drawn as an outline stroke, and a "filled" form (filledsquare,    */
   /* ...) drawn as a solid fill.  cross/plus are stroked single-line  */
   /* glyphs in both forms (no fill).                                  */
+  /* Strip the "do" prefix first, then the optional "filled" prefix,  */
+  /* so all four spellings (square / dosquare / filledsquare /         */
+  /* dofilledsquare) reduce to a bare shape name plus an is_filled    */
+  /* flag.  Without the second strip "filledsquare" never matched any */
+  /* shape branch below and the function silently emitted nothing --  */
+  /* the root cause of the user-guide page 248 / 262 regression where */
+  /* @Graph plot symbols vanished from the SVG output.                */
   shape = is_do ? name + 2 : name;
-  if( strcmp(shape, "square") == 0 || strcmp(shape, "diamond") == 0 ||
-      strcmp(shape, "circle") == 0 || strcmp(shape, "triangle") == 0 )
-    outline = 1;
+  is_filled = (strncmp(shape, "filled", 6) == 0);
+  if( is_filled )
+    shape = shape + 6;
+  outline = !is_filled;
+  /* cross and plus are stroked single-line glyphs in either spelling;  */
+  /* never fill.  Their dispatch below already passes 1,0 to emit_path. */
   if( !is_do )
   {
     /* No-arg wrapper: pull xcurr/ycurr/symbolsize/symbollinewidth     */
