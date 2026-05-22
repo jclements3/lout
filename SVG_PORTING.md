@@ -792,3 +792,70 @@ before the fix) and pool_used stays under 20 indefinitely.
   Verification this round.  All 53 regression snippets still pass
   (`tests/run_all.sh` -> 53/0, Pass-Excellent 24/24).  No
   `include/` files were changed; the audit is documentation-only.
+
+### Rotated `show` inside @Graphic (fixed 2026-05-22)
+
+`svg_ps_show` was emitting text without honouring the CTM-rotation
+component of the surrounding PS state.  PS prologue idioms of the form
+`translate N rotate offset moveto show` (e.g. `ldiagshowtags` in
+`diagf.lpg`, plus any user `@Graphic` body that rotates the frame
+before showing text) ended up with the text positioned at the rotated
+origin but rendered upright in the SVG output.  In the User's Guide
+this hit pages 205-207 (the @Diag "compass-point labels" demo on
+labels.) — the named-direction labels around the box rendered upright
+in SVG but rotated 40 degrees in PS.
+
+Fix: in `svg_ps_show`, probe the path-delta's x-axis direction by
+transforming `(0,0)` and `(PT,0)` and computing
+`atan2(dy, dx) * 180/PI`.  When that angle is non-trivial
+(`|angle| > 0.01`), the emitted text wrapper becomes
+`<g transform="translate(x,y) rotate(angle) scale(1,-1)">`.  The
+rotate sits before the scale(1,-1) so it is interpreted in the bottom-
+left frame inside the page-level Y-flip group (CCW positive, matching
+PS).  Adds ~22 LOC to z53.c.  Regression snippet
+`graphic_rotated_show.lt` (12 labels evenly placed around a circle,
+each rotated 30 degrees further than the last) was added to the test
+corpus; it passes Pass-Excellent (AE=8749, SSIM=0.9927).
+
+### Known remaining @Fig / @Diag limitations
+
+The following come from a 2026-05-22 audit of user-guide pages with
+diff_ratio > 7% that lie in the @Diag chapter (pages ~193-225) or in
+@Fig-using sections.  None are real layout bugs; all are either
+already-tracked irreducibles or fall outside the no-touch budget for
+this round.
+
+- **Pagination drift in dense prose pages adjacent to @Diag examples**
+  (e.g. pages 205, 207, 213, 219).  Same paragraphs, half-line vertical
+  offset between PS and SVG.  Caused by the Ghostscript vs librsvg
+  text-antialiasing-at-the-pixel-level disagreement compounding into
+  Lout line-break decisions over a long page.  Documented at length
+  in `tests/user_guide_diff/README.md` "SSIM vs AE".  No back-end fix.
+
+- **Faux-italic body text inside @Diag node bodies** (e.g. page 207's
+  `label` placeholder, drawn as `1.0 fnt5  0.5 0.5 0.5 LoutSetRGBColor
+  ...(label)m`).  This is regular Lout text, not PS-prologue
+  text, so it goes through `SVG_PrintWord` and not `svg_ps_show`.
+  It renders correctly modulo the same antialiasing floor.
+
+- **@Graphic-emitted text inside non-uniform-scale CTM**.  The new
+  rotation-recovery code uses `atan2(dy, dx)` on the path-delta x-
+  basis; it correctly captures rotation but loses any non-uniform
+  scale or shear.  In the User's Guide the only PS-prologue paths that
+  build a sheared CTM around a `show` are inside `coltex` (texture
+  preview swatches), which already routes through `<pattern>` and not
+  through `svg_ps_show`.  No live page in the User's Guide exercises
+  sheared `show`.  Deferred: emit a full `matrix(a b c d e f)` transform
+  in `svg_ps_show` when `|a*d - b*c - 1| > epsilon` (would also need
+  to undo any non-uniform scale baked into `font_size`).
+
+- **`@Fig` per-figure caption layout**.  `@Fig` itself is just a thin
+  wrapper that emits its body through @Graphic; layout differences
+  between PS and SVG on @Fig pages are dominated by the surrounding
+  Lout galley (caption text, figure number).  The fig_multi and
+  fig_numbering snippets exercise this path and pass.  No real bug.
+
+  Verification.  All 63 regression snippets pass
+  (`tests/run_all.sh` -> 63/0, Pass-Excellent 63/63).  The new
+  `graphic_rotated_show.lt` snippet guards the rotated-show fix
+  against future regressions.
