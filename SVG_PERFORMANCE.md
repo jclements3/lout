@@ -28,6 +28,7 @@ Stable, warm-cache, single-pass timings on the user-guide build
 | + #4 hash `svg_ps_exec_op` dispatch (`2a33e3d`) | ~32 s   | ~22 s   | -      | real -15% (and ~-58% vs the pre-perf-work ~77 s wall) |
 | + #5 hash `svg_glyph_to_unicode`; per-font face-flag cache; consolidate SVG_PrintWord stdio (perf round 3) | ~26-29 s | ~20 s | 0.4-0.9 s | real -15% vs #4, user -10% vs #4 |
 | + #6 hand-rolled itoa/ftoa3 in `SVG_PrintBetweenPages`/`SVG_LinkDest`; coord-folded Y-flip on text emission; function-pointer dispatch for the 11 hottest PS ops (perf round 4) | ~22-30 s | ~19-21 s | 0.4-0.7 s | real -10% vs #5, user -5% vs #5; SVG output 13.5% smaller (17.45 MB -> 15.10 MB) |
+| + #7 z53_glyph arena amortise: upfront `svg_glyph_arena_reserve` before T1/CFF subr+charstring loops (safety + perf) | no measurable change | no measurable change | - | hardens against the realloc-aliasing class found in PR #123; also amortises growth -- font loading is not hot enough in `-r3` to move the wall-clock needle, but the per-loader allocation count drops from O(N) to O(1) |
 
 Cumulative wall-time delta over the dict-hash baseline: **real -5.3%**,
 **user -5.3%**, **sys -19%**.  Below the 25-40% goal -- once

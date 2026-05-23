@@ -391,7 +391,12 @@ static unsigned char *svg_glyph_arena_alloc(svg_glyph_font *f, size_t n)
 /* Ensure the arena has capacity for at least `n` more bytes without        */
 /* triggering a realloc on the next allocation.  Used by the TrueType       */
 /* loader so per-glyph cs4 pointers stored during the registration loop     */
-/* keep pointing at the same arena block.                                   */
+/* keep pointing at the same arena block.  Also called by the Type 1 and    */
+/* CFF loaders to amortise growth and -- critically -- guarantee that the   */
+/* arena buffer cannot move while subr/charstring pointers are being        */
+/* recorded into f->subrs[] / f->gsubrs[] / f->glyphs[].cs.  See the        */
+/* comment on glyf_arena_off in the struct definition: a realloc that      */
+/* moves the arena leaves every previously stored pointer dangling.        */
 static int svg_glyph_arena_reserve(svg_glyph_font *f, size_t extra)
 {
   size_t want = f->arena_used + extra;
@@ -406,6 +411,50 @@ static int svg_glyph_arena_reserve(svg_glyph_font *f, size_t extra)
     return 1;
   }
 }
+
+/* DEBUG-only sanity check: verify that every cs / subr / gsubr pointer       */
+/* stored in `f` lies within the current arena [arena, arena+arena_used).     */
+/* Run this at the end of each loader to catch the realloc-aliasing bug       */
+/* class that PR #123 surfaced.  In release builds the body is empty and       */
+/* the compiler folds the call away.                                          */
+#if DEBUG_ON
+static void svg_glyph_arena_audit(const svg_glyph_font *f, const char *where)
+{
+  const unsigned char *base = f->arena;
+  const unsigned char *end  = base + f->arena_used;
+  int i;
+  if( base == NULL ) return;
+  for( i = 0; i < f->nglyphs; i++ )
+  { const unsigned char *p = f->glyphs[i].cs;
+    if( p == NULL ) continue;
+    if( p < base || p >= end ||
+        p + f->glyphs[i].cs_len > end )
+      fprintf(stderr,
+        "lout: z53_glyph arena audit FAIL (%s): glyph[%d].cs out of range\n",
+        where, i);
+  }
+  for( i = 0; i < f->nsubrs; i++ )
+  { const unsigned char *p = f->subrs[i].cs;
+    if( p == NULL ) continue;
+    if( p < base || p >= end ||
+        p + f->subrs[i].cs_len > end )
+      fprintf(stderr,
+        "lout: z53_glyph arena audit FAIL (%s): subr[%d].cs out of range\n",
+        where, i);
+  }
+  for( i = 0; i < f->ngsubrs; i++ )
+  { const unsigned char *p = f->gsubrs[i].cs;
+    if( p == NULL ) continue;
+    if( p < base || p >= end ||
+        p + f->gsubrs[i].cs_len > end )
+      fprintf(stderr,
+        "lout: z53_glyph arena audit FAIL (%s): gsubr[%d].cs out of range\n",
+        where, i);
+  }
+}
+#else
+#define svg_glyph_arena_audit(f, where) ((void) 0)
+#endif
 
 
 /*****************************************************************************/
@@ -658,6 +707,14 @@ static int svg_glyph_parse_subrs(svg_glyph_font *f,
   size_t i;
   off = svg_glyph_find(buf, len, "/Subrs");
   if( off < 0 ) return 1;  /* no subrs is fine */
+  /* Amortise growth and -- more importantly -- pin the arena: every plain   */
+  /* charstring we drop in is <= its source bytes, so reserving the         */
+  /* remaining post-/Subrs slice bounds the loop's total allocation and     */
+  /* guarantees the subr pointers we store can't be invalidated mid-loop   */
+  /* by a realloc that moves the underlying buffer.  Failure here is       */
+  /* fatal: degrading to per-alloc growth would reintroduce the dangling-  */
+  /* pointer bug that PR #123 fixed.                                       */
+  if( !svg_glyph_arena_reserve(f, len - (size_t) off) ) return 0;
   i = (size_t) off + 6;
   /* skip "/Subrs <n> array" preamble; scan for the first "dup" entry */
   while( i < len )
@@ -728,6 +785,11 @@ static int svg_glyph_parse_charstrings(svg_glyph_font *f,
   size_t i;
   off = svg_glyph_find(buf, len, "/CharStrings");
   if( off < 0 ) return 0;
+  /* See the matching comment in svg_glyph_parse_subrs.  Reserving the     */
+  /* remaining post-/CharStrings slice keeps the arena stationary across   */
+  /* the loop, so the f->glyphs[].cs pointers we record can't be          */
+  /* invalidated by a later realloc.                                       */
+  if( !svg_glyph_arena_reserve(f, len - (size_t) off) ) return 0;
   i = (size_t) off + 12;
   /* scan forward for entries beginning with '/'.  Stop at "end" preceded    */
   /* by a newline -- a coarse but adequate terminator.                       */
@@ -893,7 +955,8 @@ static int svg_glyph_load_font(const char *ps_name)
       f->lenIV = svg_glyph_parse_lenIV(plain, plain_len);
       svg_glyph_parse_subrs(f, plain, plain_len);
       if( svg_glyph_parse_charstrings(f, plain, plain_len) && f->nglyphs > 0 )
-      { free(plain); f->loaded = 1; return svg_glyph_n_fonts - 1; }
+      { svg_glyph_arena_audit(f, "T1");
+        free(plain); f->loaded = 1; return svg_glyph_n_fonts - 1; }
       free(plain);  plain = NULL;
     }
     else
@@ -917,6 +980,7 @@ static int svg_glyph_load_font(const char *ps_name)
     {
       f->kind   = SVG_GLYPH_KIND_CFF;
       f->loaded = 1;
+      svg_glyph_arena_audit(f, "CFF");
       return svg_glyph_n_fonts - 1;
     }
   }
@@ -933,6 +997,7 @@ static int svg_glyph_load_font(const char *ps_name)
     {
       f->kind   = SVG_GLYPH_KIND_TTF;
       f->loaded = 1;
+      svg_glyph_arena_audit(f, "TTF");
       return svg_glyph_n_fonts - 1;
     }
   }
@@ -2000,8 +2065,12 @@ static int svg_glyph_load_cff(svg_glyph_font *f,
   }
 
   /* Copy global Subrs into the font's gsubr table.                          */
+  /* Reserve the full INDEX payload up front: each cs we record points into  */
+  /* the arena, and a mid-loop realloc would invalidate the pointers from   */
+  /* earlier iterations (the bug class PR #123 found).                      */
   f->ngsubrs = (int) gsubr_ix.count;
   if( f->ngsubrs > SVG_GLYPH_MAX_GSUBRS ) f->ngsubrs = SVG_GLYPH_MAX_GSUBRS;
+  if( !svg_glyph_arena_reserve(f, gsubr_ix.total_size) ) return 0;
   for( i = 0; i < f->ngsubrs; i++ )
   { const unsigned char *p;  int plen;
     if( !svg_glyph_cff_index_get(&gsubr_ix, (unsigned int) i, &p, &plen) )
@@ -2018,6 +2087,7 @@ static int svg_glyph_load_cff(svg_glyph_font *f,
   /* Copy local Subrs.                                                       */
   f->nsubrs = (int) lsubr_ix.count;
   if( f->nsubrs > SVG_GLYPH_MAX_SUBRS ) f->nsubrs = SVG_GLYPH_MAX_SUBRS;
+  if( !svg_glyph_arena_reserve(f, lsubr_ix.total_size) ) return 0;
   for( i = 0; i < f->nsubrs; i++ )
   { const unsigned char *p;  int plen;
     if( !svg_glyph_cff_index_get(&lsubr_ix, (unsigned int) i, &p, &plen) )
@@ -2040,6 +2110,11 @@ static int svg_glyph_load_cff(svg_glyph_font *f,
 
   /* Walk CharStrings INDEX, copy each charstring into the arena, and tag    */
   /* with its glyph name (via charset SID lookup).                           */
+  /* Reserve the full CharStrings INDEX payload up front so the per-glyph    */
+  /* dst pointers we record into f->glyphs[].cs cannot be invalidated by a  */
+  /* mid-loop arena realloc.  See PR #123 for the failure mode.             */
+  if( !svg_glyph_arena_reserve(f, cs_ix.total_size) )
+  { free(sid_for_gid); return 0; }
   f->nglyphs = 0;
   for( i = 0; i < n_glyphs && f->nglyphs < SVG_GLYPH_MAX_GLYPHS; i++ )
   {
