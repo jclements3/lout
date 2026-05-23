@@ -7197,6 +7197,41 @@ static void SVG_DefineGraphicNames(OBJECT x)
   cur_gr_louts = width(space_gap(save_style(x)));
   cur_gr_set   = TRUE;
 
+  /* Propagate the current Lout font (set by SetFont / SetBaseLineMarkAnd- */
+  /* Font on the enclosing scope) into the PS interpreter's per-gstate    */
+  /* font_name/font_size, so embedded PS that calls `show` without its    */
+  /* own findfont/scalefont (notably graphf.lpg's printxlabel/printylabel */
+  /* tick-label routines, which inherit the ambient font) renders at the */
+  /* right size and family rather than the interpreter's 10pt Times-Roman */
+  /* default.  PS mode gets this for free because the prologue emits      */
+  /* "<size> fnt<n>" (which findfont/scalefont/setfonts) before the      */
+  /* LoutGraphic call; SVG has no such on-the-wire echo, so we mirror it  */
+  /* explicitly here.  Any findfont/scalefont inside the @Graphic body   */
+  /* will overwrite these, exactly as in PS.                              */
+  {
+    FONT_NUM gf = font(save_style(x));
+    if( gf > 0 )
+    {
+      /* FontFamily(gf) yields the human-readable PS family ("Times-Roman"  */
+      /* or "Helvetica") that the rest of z53.c uses for <text> font-family */
+      /* attributes; FontName(gf) returns Lout's short handle ("fnt1") which */
+      /* would be meaningless as an SVG family.  Bold/Italic detection in   */
+      /* svg_ps_show uses strstr on font_name, which matches naturally on   */
+      /* families like "Times-Bold" or "Helvetica-Oblique".                 */
+      FULL_CHAR *family = FontFamily(gf);
+      if( family != NULL )
+      {
+        char *dst = g_psstate.gs[g_psstate.gs_top].font_name;
+        size_t cap = sizeof g_psstate.gs[g_psstate.gs_top].font_name;
+        size_t n = strlen((const char *) family);
+        if( n >= cap ) n = cap - 1;
+        memcpy(dst, (const char *) family, n);
+        dst[n] = '\0';
+      }
+      g_psstate.gs[g_psstate.gs_top].font_size = (double) FontSize(gf, x);
+    }
+  }
+
   /* Propagate the current Lout colour (set by an enclosing @Colour or     */
   /* @SetColour) into the PS interpreter's per-gstate fill/stroke colour.  */
   /* PS mode achieves this naturally via SetColourAndTexture writing a    */
