@@ -2177,6 +2177,9 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
     char hdr[256];
     char *p = hdr;
     const char *q;
+    FULL_CHAR *ws;
+    int need_preserve;
+    int i, slen;
     q = "<text transform=\"matrix(1 0 0 -1 ";
     while( *q != '\0' ) *p++ = *q++;
     p += svg_ftoa3(x_pt, p);
@@ -2206,6 +2209,34 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
     for( q = colour_str; *q != '\0'; q++ )
       *p++ = *q;
     *p++ = '"';
+    /* xml:space="preserve" predicate: SVG renderers (browsers, librsvg)    */
+    /* collapse leading, trailing, and runs of internal spaces in <text>   */
+    /* content by default.  @Code blocks in lout/doc/slides (e.g. pages   */
+    /* 019 and 032) rely on those exact spaces for column alignment.      */
+    /* Mark the element when the word starts or ends with a space or has  */
+    /* two or more consecutive spaces anywhere -- the cases where the     */
+    /* default xml:space="default" would visibly drop characters.          */
+    ws = string(x);
+    need_preserve = 0;
+    if( ws != NULL )
+    {
+      slen = (int) strlen((const char *) ws);
+      for( i = 0; i < slen; i++ )
+      {
+        if( i == 0 && ws[i] == (FULL_CHAR) ' ' )
+        { need_preserve = 1; break; }
+        if( i == slen - 1 && ws[i] == (FULL_CHAR) ' ' )
+        { need_preserve = 1; break; }
+        if( i > 0 && ws[i] == (FULL_CHAR) ' ' &&
+            ws[i-1] == (FULL_CHAR) ' ' )
+        { need_preserve = 1; break; }
+      }
+    }
+    if( need_preserve )
+    {
+      q = " xml:space=\"preserve\"";
+      while( *q != '\0' ) *p++ = *q++;
+    }
     *p++ = '>';
     fwrite(hdr, 1, (size_t) (p - hdr), out_fp);
   }
