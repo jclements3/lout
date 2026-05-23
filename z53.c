@@ -1174,22 +1174,27 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
   size_pt = (double) fsize         / PT;
 
   colour_str = svg_colour_rgb(word_colour(x), colourbuf);
+  /* Default-black is folded to "currentColor" so a CSS `color:` on any     */
+  /* ancestor (e.g. mdlout's dark-mode wrapper) can re-tint the glyphs.    */
+  /* Per SVG spec, currentColor with no inherited color resolves to black, */
+  /* so standalone .svg viewing is byte-equivalent in output appearance.   */
+  if( colour_str != NULL && strcmp(colour_str, "rgb(0,0,0)") == 0 )
+    colour_str = "currentColor";
+  else if( colour_str == NULL )
+    colour_str = "currentColor";
 
   /* Counter-flip wrapper so the glyph is upright inside the page-level Y-  */
   /* flip group.  The text origin lives at (x_pt, y_pt) in flipped coords; */
   /* after scale(1,-1) the local frame is back to top-left, so x="0" y="0" */
-  /* anchors the baseline.  Attribute order matches the pre-cache emit       */
-  /* exactly so the SVG is byte-for-byte identical to baseline.              */
+  /* anchors the baseline.                                                  */
   fprintf(out_fp,
     "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">"
-    "<text x=\"0\" y=\"0\"%s font-size=\"%.3f\"%s%s%s%s%s>",
+    "<text x=\"0\" y=\"0\"%s font-size=\"%.3f\"%s%s fill=\"%s\">",
     x_pt, y_pt,
     family_attr, size_pt,
     is_bold   ? " font-weight=\"bold\""  : "",
     is_italic ? " font-style=\"italic\"" : "",
-    colour_str != NULL ? " fill=\""     : "",
-    colour_str != NULL ? colour_str     : "",
-    colour_str != NULL ? "\""            : "");
+    colour_str);
   svg_emit_word_text(fnum, string(x), x, size_pt);
   fputs("</text></g>\n", out_fp);
 }
@@ -1218,6 +1223,10 @@ static void SVG_PrintUnderline(FONT_NUM fnum, COLOUR_NUM col, TEXTURE_NUM pat,
   y_svg = (double) (ymk - finfo[fnum].underline_pos) / PT;
   thick = (double) finfo[fnum].underline_thick / PT;
   colour_str = svg_colour_rgb(col, colourbuf);
+  /* Default-black underline rules fold to "currentColor" so they re-tint   */
+  /* with the ambient CSS color (e.g. mdlout's dark-mode wrapper).          */
+  if( colour_str != NULL && strcmp(colour_str, "rgb(0,0,0)") == 0 )
+    colour_str = NULL;
   fprintf(out_fp,
     "<line x1=\"%.3f\" y1=\"%.3f\" x2=\"%.3f\" y2=\"%.3f\" "
     "stroke=\"%s\" stroke-width=\"%.3f\"/>\n",
@@ -1369,8 +1378,15 @@ static void SVG_CoordVMirror(void)
 /*                                                                           */
 /*  Concatenate @Graphic content into one flat buffer.                       */
 /*                                                                           */
-/*  Unlike the previous stub, GAP_OBJ separators are turned into spaces so    */
-/*  the PS tokeniser can find operator boundaries.                           */
+/*  Mirrors PS_PrintGraphicObject (z49.c): WORD/QWORD contents are written  */
+/*  raw with NO trailing space, and GAP_OBJ contributes a single space only */
+/*  when hspace > 0 (a newline when vspace > 0).  This matches PostScript   */
+/*  output semantics so that adjacent Lout-level WORDs separated by a zero- */
+/*  width GAP_OBJ (e.g. `"/lfig"paint` in figf) concatenate into one PS     */
+/*  token (`/lfiglightgrey`) -- not two tokens (`/lfig`, `lightgrey`).      */
+/*  Without this, /lfig<NAME> macros from figf/diagf produced spurious     */
+/*  "unknown PostScript operator" warnings for the trailing fragment        */
+/*  (lightgrey, solid, dashed, ...).                                        */
 /*                                                                           */
 /*****************************************************************************/
 
@@ -1393,9 +1409,6 @@ static int svg_graphic_concat(OBJECT x, char *buf, int pos, int buf_size)
         slen = buf_size - 2 - pos;
       memcpy(buf + pos, s, slen);
       pos += slen;
-      /* always end a WORD with a separating space so adjacent words don't */
-      /* fuse into bogus tokens                                            */
-      buf[pos++] = ' ';
       buf[pos] = '\0';
       break;
     case ACAT:
@@ -1405,9 +1418,10 @@ static int svg_graphic_concat(OBJECT x, char *buf, int pos, int buf_size)
           ;
         if( type(y) == GAP_OBJ )
         {
-          if( pos < buf_size - 2 )
+          if( pos < buf_size - 2 &&
+              (vspace(y) > 0 || hspace(y) > 0) )
           {
-            buf[pos++] = ' ';
+            buf[pos++] = (vspace(y) > 0) ? '\n' : ' ';
             buf[pos] = '\0';
           }
           continue;
@@ -2646,6 +2660,9 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
       col = g->stroke_rgb;
     else
       col = "currentColor";
+    /* Fold an explicit black to "currentColor" so CSS color: cascades in.   */
+    if( strcmp(col, "rgb(0,0,0)") == 0 )
+      col = "currentColor";
     /* If a texture is in effect on the current gstate, use the matching     */
     /* <pattern> as the fill, and set the SVG inheritable `color` property  */
     /* so the pattern's currentColor strokes/fills pick up the active hue.  */
@@ -2662,6 +2679,8 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
   if( do_stroke )
   {
     const char *col = g->stroke_rgb[0] != '\0' ? g->stroke_rgb : "currentColor";
+    if( strcmp(col, "rgb(0,0,0)") == 0 )
+      col = "currentColor";
     const char *cap_name = NULL;
     const char *join_name = NULL;
     fprintf(out_fp, " stroke=\"%s\"", col);
@@ -3307,6 +3326,12 @@ static void svg_ps_show(svg_ps_state *s, const char *str)
 
   col = g->fill_rgb[0] != '\0' ? g->fill_rgb :
         (g->stroke_rgb[0] != '\0' ? g->stroke_rgb : NULL);
+  /* Fold explicit black to currentColor so the surrounding CSS color:      */
+  /* cascade can re-tint this glyph block under dark mode.                  */
+  if( col != NULL && strcmp(col, "rgb(0,0,0)") == 0 )
+    col = "currentColor";
+  else if( col == NULL )
+    col = "currentColor";
 
   /* Counter-flip wrapper so glyphs are upright inside the page-level Y-     */
   /* flip group, with an optional rotate() if the path-delta carries one.   */
