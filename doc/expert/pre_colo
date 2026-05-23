@@ -18,6 +18,9 @@ produces the red result
     PostScript @Yield {
       { 1.0 0.0 0.0 setrgbcolor } @SetColour { hello, world }
     }
+    SVG @Yield {
+      { 1.0 0.0 0.0 setrgbcolor } @SetColour { hello, world }
+    }
     PDF @Yield {
       { 1.0 0.0 0.0 rg 1.0 0.0 0.0 RG } @SetColour { hello, world }
     }

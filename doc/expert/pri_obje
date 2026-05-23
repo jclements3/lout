@@ -97,6 +97,13 @@ has result
       |0.2i @ShowMarks Australia
 /0.1i @ShowMarks Washington  |     @ShowMarks Canberra
     }
+    SVG @Yield {
+      @ShowMarks USA &
+      { 0 ymark moveto xsize 10 pt add ymark lineto [ 3 pt ] 0 setdash stroke }
+      @Graphic {1c @Wide }
+      |0.2i @ShowMarks Australia
+/0.1i @ShowMarks Washington  |     @ShowMarks Canberra
+    }
     PDF @Yield {
       @ShowMarks USA &
       { [ __mul(3, __pt) ] 0 d 0 __ymark m __add(__xsize, __mul(10, __pt)) __ymark l S }

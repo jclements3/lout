@@ -414,6 +414,10 @@ def @ShowMarks
         { 0 0 moveto xsize 0 lineto stroke }
         @Graphic {}
        }
+       SVG @Yield {
+        { 0 0 moveto xsize 0 lineto stroke }
+        @Graphic {}
+       }
        PDF @Yield {
         { 0 0 m __xsize 0 l S }
         @Graphic {}
@@ -426,6 +430,11 @@ def @ShowMarks
    {
      @BackEnd @Case {
        PostScript @Yield {
+         length @High
+         { 0 0 moveto 0 ysize lineto [ 3 pt ] 0 setdash stroke }
+         @Graphic {}
+       }
+       SVG @Yield {
          length @High
          { 0 0 moveto 0 ysize lineto [ 3 pt ] 0 setdash stroke }
          @Graphic {}
@@ -443,6 +452,19 @@ def @ShowMarks
    {
      @BackEnd @Case {
        PostScript @Yield {
+         @OneCol @OneRow
+         {
+         {  //0.2c
+            0.6c @High 1.2c @Wide
+            { 0 0 moveto xsize 0 lineto
+	          xsize ysize lineto 0 ysize lineto closepath
+	          gsave 0.9 setgray fill grestore stroke }
+            @Graphic {}
+         }
+         ||offset @VDashLine 1c
+         }
+       }
+       SVG @Yield {
          @OneCol @OneRow
          {
          {  //0.2c
@@ -538,6 +560,16 @@ def @ShowMarks
    {
      @BackEnd @Case {
        PostScript @Yield {
+         @HContract @VContract
+         { 0 0 moveto xsize 0 lineto xsize ysize lineto
+	       0 ysize lineto closepath stroke } @Graphic
+         {  //0.3c ||0.3c
+           9px @Break 8p @Font
+           2.8c @Wide 3.8c @High x
+           ||0.3c //0.3c
+         }
+       }
+       SVG @Yield {
          @HContract @VContract
          { 0 0 moveto xsize 0 lineto xsize ysize lineto
 	       0 ysize lineto closepath stroke } @Graphic

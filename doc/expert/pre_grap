@@ -41,6 +41,20 @@ The result of the above invocation of the symbol @@Graphic is
         //0.2c
       }
     }
+    SVG @Yield {
+      { 0     0     moveto
+        0     ysize lineto
+        xsize ysize lineto
+        xsize 0     lineto
+        closepath
+        stroke
+      }
+      @Graphic
+      { //0.2c
+        ||0.2c hello, world ||0.2c
+        //0.2c
+      }
+    }
     PDF @Yield {
       { 0       0       m
         0       __ysize l
@@ -200,6 +214,12 @@ has result
       }
       @Graphic { 3i @Wide }
     }
+    SVG @Yield {
+      { 0 0 moveto xsize 0 lineto
+        2 pt setlinewidth [ 5 pt ] 0 setdash stroke
+      }
+      @Graphic { 3i @Wide }
+    }
     PDF @Yield {
       { [ __mul(5, __pt) ] 0 d __mul(2, __pt) w 0 0 m __xsize 0 l S
       }
@@ -222,6 +242,13 @@ has result
 @ID @OneRow {
   @BackEnd @Case {
     PostScript @Yield {
+      { 0 0 moveto xsize 0 lineto 0 ysize lineto closepath
+        0.8 setgray fill
+      }
+      @Graphic
+      { 2c @Wide  2c @High }
+    }
+    SVG @Yield {
       { 0 0 moveto xsize 0 lineto 0 ysize lineto closepath
         0.8 setgray fill
       }
