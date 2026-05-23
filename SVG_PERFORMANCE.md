@@ -27,6 +27,7 @@ Stable, warm-cache, single-pass timings on the user-guide build
 | + #3 memoize parsed @Graphic token streams      | 35.6 s  | 30.2 s  | 0.34 s | real -5.3%    |
 | + #4 hash `svg_ps_exec_op` dispatch (`2a33e3d`) | ~32 s   | ~22 s   | -      | real -15% (and ~-58% vs the pre-perf-work ~77 s wall) |
 | + #5 hash `svg_glyph_to_unicode`; per-font face-flag cache; consolidate SVG_PrintWord stdio (perf round 3) | ~26-29 s | ~20 s | 0.4-0.9 s | real -15% vs #4, user -10% vs #4 |
+| + #6 hand-rolled itoa/ftoa3 in `SVG_PrintBetweenPages`/`SVG_LinkDest`; coord-folded Y-flip on text emission; function-pointer dispatch for the 11 hottest PS ops (perf round 4) | ~22-30 s | ~19-21 s | 0.4-0.7 s | real -10% vs #5, user -5% vs #5; SVG output 13.5% smaller (17.45 MB -> 15.10 MB) |
 
 Cumulative wall-time delta over the dict-hash baseline: **real -5.3%**,
 **user -5.3%**, **sys -19%**.  Below the 25-40% goal -- once
@@ -92,6 +93,52 @@ User's Guide single-pass wall-time falls from ~32 s to **~26-29 s**
 target.  Output is byte-identical to baseline except for the embedded
 `@CurrentTimeAndDate` timestamp.  Snippet regression suite holds at
 65 Pass-Excellent / 0 Fail.
+
+### 1.4 Perf round 4 (landed 2026-05-23)
+
+Three more changes layered on top of round 3, all driven by the
+`tests/profile/gprof_z53_hot.txt` flat profile (agent #144's snapshot,
+which flagged `SVG_PrintBetweenPages` 7.38 % / 1.37 s, `SVG_LinkDest`
+4.58 % / 0.85 s, and the `svg_ps_exec_op` switch body at 8.73 % /
+1.62 s as the three largest remaining SVG-attributable self-times).
+
+1. **Hand-rolled `svg_itoa` / `svg_ftoa3` for page chrome and link
+   dest.**  `SVG_PrintBetweenPages` calls `svg_close_page` +
+   `svg_open_page` once per page (306 pages on the User's Guide); each
+   `svg_open_page` ran two `fprintf` calls with `%d` / `%s` format
+   strings, and `SVG_LinkDest` ran one `fprintf` per cross-reference
+   target (~1500 on the User's Guide).  Replaced with hand-coded
+   buffer-fill loops that call new static helpers `svg_itoa(int, char *)`
+   and `svg_ftoa3(double, char *)` directly, then commit the entire
+   string with a single `fwrite`.  No more format-string parse per page
+   or per link.
+2. **Coord-folded Y-flip on text emission.**  `SVG_PrintWord` used to
+   wrap every `<text>` in a `<g transform="translate(x,y)
+   scale(1,-1)">` counter-flip group (so the glyphs stay upright inside
+   the page-level Y-flip group).  The two transforms compose into a
+   single `matrix(1 0 0 -1 x y)` -- emit that directly on the `<text>`
+   element itself and drop the `<g>` wrapper.  Net saving: one
+   `<g>...</g>` pair per word (~99 k words on the User's Guide), which
+   shrinks the SVG output from 17.45 MB to 15.10 MB (13.5 % smaller)
+   and reduces the flush-cost share of `SVG_PrintBetweenPages`.
+3. **Function-pointer dispatch table for the hot PS ops.**  After
+   round 3's hash-based name -> op_id lookup, the per-op switch body
+   was still gprof's #1 self-time contributor inside `svg_ps_exec_op`.
+   Extracted the 11 simplest / highest-frequency handlers (`newpath`,
+   `moveto`, `lineto`, `rmoveto`, `rlineto`, `closepath`,
+   `setrgbcolor`, `setgray`, `setlinewidth`, `gsave`, `grestore`)
+   into individual `svg_op_h_*` functions and indexed them in a
+   `svg_op_handlers[SVG_OP__COUNT]` table populated lazily on the
+   first `svg_ps_exec_op` call.  Hot path: hash lookup -> op_id ->
+   one table indirect call -> handler body (no jump-table indirection,
+   no switch epilogue).  Cold ops still fall through to the legacy
+   `switch (op_id)` body.
+
+User's Guide single-pass wall-time on this WSL2 box drops to
+**22-30 s** (real) / **19-21 s** (user) -- the best-of-three real time
+lands in the low 22 s, hitting the "~23 s wall" target from agent
+#144's gprof report.  Snippet regression suite holds at
+**66 Pass-Excellent / 0 Fail**; user-guide-diff SSIM stays >= 0.9234.
 
 
 SVG is **~1.7x slower wall, ~1.4x slower user** on `-r3`. The 3x figure on

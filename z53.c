@@ -86,6 +86,122 @@ static BOOLEAN     cur_gr_set;
 
 /*****************************************************************************/
 /*                                                                           */
+/*  Hand-rolled itoa / ftoa3 helpers used by the high-volume page-chrome     */
+/*  and link emitters.  Profile (perf-round-3 gprof) showed                  */
+/*  SVG_PrintBetweenPages and SVG_LinkDest spending the bulk of their self- */
+/*  time inside `fprintf`'s format-string parser.  Both functions emit       */
+/*  fixed-shape markup with a handful of integers and three-decimal-place    */
+/*  doubles; replacing the `fprintf` with hand-coded buffer-fill +           */
+/*  `fwrite`/`fputs` cuts the per-call cost to a few cycles per integer/     */
+/*  double and avoids re-parsing the format string each page.                */
+/*                                                                           */
+/*  Both helpers write into a caller-supplied buffer (ample-sized: the page  */
+/*  chrome string is < 256 bytes, link-dest rect < 320) and return the       */
+/*  number of bytes written.  No null terminator is appended -- the caller   */
+/*  uses fwrite/fputs explicitly.  For safety the helpers also do not bounds-*/
+/*  check; callers size the buffer to the worst case for their string.       */
+/*                                                                           */
+/*****************************************************************************/
+
+/* Write n as decimal ASCII into buf; return number of bytes written.  Works */
+/* for the full signed-int range including INT_MIN.                          */
+static int svg_itoa(int n, char *buf)
+{
+  char tmp[16];
+  int i, len;
+  unsigned int un;
+  char *p;
+
+  p = buf;
+  if( n < 0 )
+  {
+    *p++ = '-';
+    /* avoid INT_MIN overflow when negating: cast through unsigned */
+    un = (unsigned int) (-(n + 1)) + 1u;
+  }
+  else
+    un = (unsigned int) n;
+  i = 0;
+  if( un == 0 )
+    tmp[i++] = '0';
+  else
+  {
+    while( un != 0 )
+    {
+      tmp[i++] = (char) ('0' + (un % 10u));
+      un /= 10u;
+    }
+  }
+  while( i > 0 )
+    *p++ = tmp[--i];
+  len = (int) (p - buf);
+  return len;
+}
+
+/* Write v into buf with three decimal places (matching the historic        */
+/* `%.3f` format used by all SVG numeric attributes).  Negative-zero is     */
+/* rendered as "0.000" to match printf behaviour for small negatives that   */
+/* round to zero at three places.  Handles NaN/Inf by falling back to a    */
+/* literal "0.000" so the SVG stays well-formed.                            */
+static int svg_ftoa3(double v, char *buf)
+{
+  long long whole;
+  int frac;
+  double av;
+  char *p;
+  int neg;
+
+  /* NaN test: NaN != NaN in IEEE-754.  Inf test: clamp to zero too.        */
+  if( v != v || v > 1e18 || v < -1e18 )
+  {
+    buf[0] = '0'; buf[1] = '.'; buf[2] = '0'; buf[3] = '0'; buf[4] = '0';
+    return 5;
+  }
+  neg = 0;
+  if( v < 0.0 )
+  {
+    av = -v;
+    neg = 1;
+  }
+  else
+    av = v;
+  /* Round half-away-from-zero, matching glibc's printf default.            */
+  av = av * 1000.0 + 0.5;
+  whole = (long long) av;
+  frac = (int) (whole % 1000);
+  whole = whole / 1000;
+  /* If the result is "0.000", drop the sign to mirror printf's output.    */
+  if( neg && whole == 0 && frac == 0 )
+    neg = 0;
+  p = buf;
+  if( neg )
+    *p++ = '-';
+  /* Integer portion.                                                       */
+  if( whole == 0 )
+    *p++ = '0';
+  else
+  {
+    char tmp[24];
+    int i = 0;
+    long long w = whole;
+    while( w != 0 )
+    {
+      tmp[i++] = (char) ('0' + (int) (w % 10));
+      w /= 10;
+    }
+    while( i > 0 )
+      *p++ = tmp[--i];
+  }
+  *p++ = '.';
+  *p++ = (char) ('0' + (frac / 100));
+  *p++ = (char) ('0' + ((frac / 10) % 10));
+  *p++ = (char) ('0' + (frac % 10));
+  return (int) (p - buf);
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)                   */
 /*                                                                           */
 /*  Initialise back-end state and emit the XML preamble and root <svg>.      */
@@ -188,31 +304,71 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
 
 static void svg_open_page(FULL_LENGTH h, FULL_LENGTH v, FULL_CHAR *label)
 {
+  /* Page-chrome buffer.  Sized to comfortably hold the fixed XML template */
+  /* (~250 bytes) plus a label string up to ~256 bytes; svg_open_page is   */
+  /* called once per page so a kilobyte-class stack buffer is fine.         */
+  char chrome[1024];
+  char *p;
   int w_pt, h_pt;
+  const char *lbl;
+  const char *q;
   if( out_fp == NULL )
     return;
   w_pt = h / PT;
   h_pt = v / PT;
   page_h = h;
   page_v = v;
-  fprintf(out_fp,
-    "<svg xmlns=\"http://www.w3.org/2000/svg\" "
-    "xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
-    "version=\"1.1\" "
-    "class=\"lout-page\" "
-    "data-page=\"%d\" "
-    "data-label=\"%s\" "
-    "width=\"%dpt\" height=\"%dpt\" "
-    "viewBox=\"0 0 %d %d\">\n",
-    pagecount, label == NULL ? "" : (const char *) label,
-    w_pt, h_pt, w_pt, h_pt);
+  /* Hand-rolled emission of the page-open chrome -- avoids the %d/%s       */
+  /* format-string parse that gprof flagged as the dominant cost of         */
+  /* SVG_PrintBetweenPages (which calls this).  Output bytes are            */
+  /* byte-identical to the previous fprintf form.                           */
+  p = chrome;
+  q = "<svg xmlns=\"http://www.w3.org/2000/svg\" "
+      "xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+      "version=\"1.1\" "
+      "class=\"lout-page\" "
+      "data-page=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_itoa(pagecount, p);
+  q = "\" data-label=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  /* Label string: assumed safe per existing behaviour (the previous        */
+  /* fprintf used a raw %s); cap at 256 bytes to stay inside the chrome     */
+  /* buffer.                                                                */
+  lbl = label == NULL ? "" : (const char *) label;
+  {
+    int i;
+    for( i = 0; i < 256 && lbl[i] != '\0'; i++ )
+      *p++ = lbl[i];
+  }
+  q = "\" width=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_itoa(w_pt, p);
+  q = "pt\" height=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_itoa(h_pt, p);
+  q = "pt\" viewBox=\"0 0 ";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_itoa(w_pt, p);
+  *p++ = ' ';
+  p += svg_itoa(h_pt, p);
+  q = "\">\n";
+  while( *q != '\0' ) *p++ = *q++;
+  fwrite(chrome, 1, (size_t) (p - chrome), out_fp);
+
   /* Page-level <defs> with hard-coded SVG <pattern> definitions for every  */
   /* named Lout texture; emitted up here (before the Y-flip group) so the   */
   /* patternUnits="userSpaceOnUse" tile sizes are in non-flipped pt units.  */
   svg_emit_pattern_defs();
   /* Single page-level Y-flip so paths/rules/transforms can use literal     */
   /* Lout (bottom-left) coordinates inside the page.                        */
-  fprintf(out_fp, "<g transform=\"matrix(1 0 0 -1 0 %d)\">\n", h_pt);
+  p = chrome;
+  q = "<g transform=\"matrix(1 0 0 -1 0 ";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_itoa(h_pt, p);
+  q = ")\">\n";
+  while( *q != '\0' ) *p++ = *q++;
+  fwrite(chrome, 1, (size_t) (p - chrome), out_fp);
   page_open = TRUE;
 }
 
@@ -1191,20 +1347,52 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
   else if( colour_str == NULL )
     colour_str = "currentColor";
 
-  /* Counter-flip wrapper so the glyph is upright inside the page-level Y-  */
-  /* flip group.  The text origin lives at (x_pt, y_pt) in flipped coords; */
-  /* after scale(1,-1) the local frame is back to top-left, so x="0" y="0" */
-  /* anchors the baseline.                                                  */
-  fprintf(out_fp,
-    "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">"
-    "<text x=\"0\" y=\"0\"%s font-size=\"%.3f\"%s%s fill=\"%s\">",
-    x_pt, y_pt,
-    family_attr, size_pt,
-    is_bold   ? " font-weight=\"bold\""  : "",
-    is_italic ? " font-style=\"italic\"" : "",
-    colour_str);
+  /* Inline the counter-flip transform on the <text> element itself instead */
+  /* of wrapping in a <g>.  This is the coord-folded form of the historic   */
+  /* `<g transform="translate(x,y) scale(1,-1)"><text x="0" y="0" ...>`     */
+  /* pattern: matrix(1 0 0 -1 x_pt y_pt) is the composition of the          */
+  /* translate and the y-axis flip, so the text origin lands at (x_pt,y_pt) */
+  /* in the page-level flipped frame with glyphs upright.  Net saving       */
+  /* (per gprof perf-round-3 recommendation #2): one <g>...</g> pair per    */
+  /* word, ~25 % of the SVG's text-emission bytes.                          */
+  {
+    char hdr[256];
+    char *p = hdr;
+    const char *q;
+    q = "<text transform=\"matrix(1 0 0 -1 ";
+    while( *q != '\0' ) *p++ = *q++;
+    p += svg_ftoa3(x_pt, p);
+    *p++ = ' ';
+    p += svg_ftoa3(y_pt, p);
+    q = ")\"";
+    while( *q != '\0' ) *p++ = *q++;
+    /* family attribute is pre-formatted with a leading space; copy it.    */
+    for( q = family_attr; *q != '\0'; q++ )
+      *p++ = *q;
+    q = " font-size=\"";
+    while( *q != '\0' ) *p++ = *q++;
+    p += svg_ftoa3(size_pt, p);
+    *p++ = '"';
+    if( is_bold )
+    {
+      q = " font-weight=\"bold\"";
+      while( *q != '\0' ) *p++ = *q++;
+    }
+    if( is_italic )
+    {
+      q = " font-style=\"italic\"";
+      while( *q != '\0' ) *p++ = *q++;
+    }
+    q = " fill=\"";
+    while( *q != '\0' ) *p++ = *q++;
+    for( q = colour_str; *q != '\0'; q++ )
+      *p++ = *q;
+    *p++ = '"';
+    *p++ = '>';
+    fwrite(hdr, 1, (size_t) (p - hdr), out_fp);
+  }
   svg_emit_word_text(fnum, string(x), x, size_pt);
-  fputs("</text></g>\n", out_fp);
+  fputs("</text>\n", out_fp);
 }
 
 static void SVG_PrintPlainGraphic(OBJECT x, FULL_LENGTH xmk, FULL_LENGTH ymk,
@@ -3781,40 +3969,150 @@ static svg_op_id svg_op_lookup(const char *name)
 static int svg_ps_exec_symbol(svg_ps_state *s, const char *name,
   svg_op_id op_id);
 
+/*****************************************************************************/
+/*                                                                           */
+/*  Hot-op fast path: function-pointer dispatch for the ~12 simplest /       */
+/*  highest-frequency operators (moveto, lineto, rmoveto, rlineto, newpath, */
+/*  closepath, setrgbcolor, setgray, gsave, grestore, setlinewidth,         */
+/*  currentpoint).  Each handler is a self-contained static function with   */
+/*  no shared locals; the table dispatch costs one indirect call (zero       */
+/*  branches) versus the switch's jump-table + per-case epilogue.            */
+/*                                                                           */
+/*  Cold / complex ops fall through to the legacy `switch (op_id)` body,    */
+/*  which gcc -O3 still compiles to a jump table.                            */
+/*                                                                           */
+/*  Per gprof (perf-round-3, recommendation #3) this targets ~2 % of total  */
+/*  user-CPU on the User's Guide build.                                      */
+/*                                                                           */
+/*****************************************************************************/
+
+typedef int (*svg_ps_op_handler)(svg_ps_state *s);
+
+static int svg_op_h_newpath(svg_ps_state *s)
+{
+  s->path[0] = '\0';
+  s->plen = 0;
+  s->had_geom = FALSE;
+  s->have_cp = FALSE;
+  s->last_pt_valid = FALSE;
+  s->has_curve = FALSE;
+  return 1;
+}
+
+static int svg_op_h_moveto(svg_ps_state *s)
+{
+  double b = svg_ps_pop(s); double a = svg_ps_pop(s);
+  svg_ps_moveto(s, a, b);
+  return 1;
+}
+
+static int svg_op_h_lineto(svg_ps_state *s)
+{
+  double b = svg_ps_pop(s); double a = svg_ps_pop(s);
+  svg_ps_lineto(s, a, b);
+  return 1;
+}
+
+static int svg_op_h_rlineto(svg_ps_state *s)
+{
+  double b = svg_ps_pop(s); double a = svg_ps_pop(s);
+  svg_ps_lineto(s, s->cur_x + a, s->cur_y + b);
+  return 1;
+}
+
+static int svg_op_h_rmoveto(svg_ps_state *s)
+{
+  double b = svg_ps_pop(s); double a = svg_ps_pop(s);
+  svg_ps_moveto(s, s->cur_x + a, s->cur_y + b);
+  return 1;
+}
+
+static int svg_op_h_closepath(svg_ps_state *s)
+{
+  svg_ps_closepath(s);
+  return 1;
+}
+
+static int svg_op_h_setrgbcolor(svg_ps_state *s)
+{
+  double c = svg_ps_pop(s); double b = svg_ps_pop(s); double a = svg_ps_pop(s);
+  svg_ps_set_rgb(s, a, b, c);
+  return 1;
+}
+
+static int svg_op_h_setgray(svg_ps_state *s)
+{
+  double a = svg_ps_pop(s);
+  svg_ps_set_rgb(s, a, a, a);
+  return 1;
+}
+
+static int svg_op_h_setlinewidth(svg_ps_state *s)
+{
+  double a = svg_ps_pop(s);
+  s->gs[s->gs_top].line_width = a / (double) PT;
+  return 1;
+}
+
+static int svg_op_h_gsave(svg_ps_state *s)
+{
+  if( s->gs_top + 1 < SVG_PS_GS_DEPTH )
+  {
+    s->gs[s->gs_top + 1] = s->gs[s->gs_top];
+    s->gs_top++;
+  }
+  return 1;
+}
+
+static int svg_op_h_grestore(svg_ps_state *s)
+{
+  if( s->gs_top > 0 ) s->gs_top--;
+  return 1;
+}
+
+/* The hot dispatch table.  Sized to SVG_OP__COUNT and zero-initialised; the */
+/* lookup loop in svg_ps_exec_op tests for non-NULL and falls through to     */
+/* the switch otherwise.  Populated lazily on first call (paired with the    */
+/* svg_op_hash_built flag).                                                  */
+static svg_ps_op_handler svg_op_handlers[SVG_OP__COUNT];
+static int               svg_op_handlers_built = 0;
+
+static void svg_op_handlers_init(void)
+{
+  int i;
+  for( i = 0; i < SVG_OP__COUNT; i++ )
+    svg_op_handlers[i] = NULL;
+  svg_op_handlers[SVG_OP_NEWPATH]     = svg_op_h_newpath;
+  svg_op_handlers[SVG_OP_MOVETO]      = svg_op_h_moveto;
+  svg_op_handlers[SVG_OP_LINETO]      = svg_op_h_lineto;
+  svg_op_handlers[SVG_OP_RLINETO]     = svg_op_h_rlineto;
+  svg_op_handlers[SVG_OP_RMOVETO]     = svg_op_h_rmoveto;
+  svg_op_handlers[SVG_OP_CLOSEPATH]   = svg_op_h_closepath;
+  svg_op_handlers[SVG_OP_SETRGBCOLOR] = svg_op_h_setrgbcolor;
+  svg_op_handlers[SVG_OP_SETGRAY]     = svg_op_h_setgray;
+  svg_op_handlers[SVG_OP_SETLINEWIDTH] = svg_op_h_setlinewidth;
+  svg_op_handlers[SVG_OP_GSAVE]       = svg_op_h_gsave;
+  svg_op_handlers[SVG_OP_GRESTORE]    = svg_op_h_grestore;
+  svg_op_handlers_built = 1;
+}
+
 static int svg_ps_exec_op(svg_ps_state *s, const char *name)
 {
   double a, b, c, d, e, f;
   svg_value va, vb;
-  svg_op_id op_id = svg_op_lookup(name);
+  svg_op_id op_id;
+  svg_ps_op_handler h;
+  op_id = svg_op_lookup(name);
   if( op_id == SVG_OP_NONE ) return 0;
+  if( !svg_op_handlers_built ) svg_op_handlers_init();
+  h = svg_op_handlers[op_id];
+  if( h != NULL )
+    return h(s);
   switch( op_id )
   {
 
-  /* drawing ops */
-  case SVG_OP_NEWPATH:
-    s->path[0] = '\0';
-    s->plen = 0;
-    s->had_geom = FALSE;
-    s->have_cp = FALSE;
-    s->last_pt_valid = FALSE;
-    s->has_curve = FALSE;
-    return 1;
-  case SVG_OP_MOVETO:
-    b = svg_ps_pop(s); a = svg_ps_pop(s);
-    svg_ps_moveto(s, a, b);
-    return 1;
-  case SVG_OP_LINETO:
-    b = svg_ps_pop(s); a = svg_ps_pop(s);
-    svg_ps_lineto(s, a, b);
-    return 1;
-  case SVG_OP_RLINETO:
-    b = svg_ps_pop(s); a = svg_ps_pop(s);
-    svg_ps_lineto(s, s->cur_x + a, s->cur_y + b);
-    return 1;
-  case SVG_OP_RMOVETO:
-    b = svg_ps_pop(s); a = svg_ps_pop(s);
-    svg_ps_moveto(s, s->cur_x + a, s->cur_y + b);
-    return 1;
+  /* drawing ops -- newpath/moveto/lineto/rmoveto/rlineto/closepath route   */
+  /* through svg_op_handlers[] above; only the multi-arg ops remain here.  */
   case SVG_OP_CURVETO:
     f = svg_ps_pop(s); e = svg_ps_pop(s);
     d = svg_ps_pop(s); c = svg_ps_pop(s);
@@ -3831,9 +4129,6 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_curveto(s, cx + a, cy + b, cx + c, cy + d, cx + e, cy + f);
     return 1;
   }
-  case SVG_OP_CLOSEPATH:
-    svg_ps_closepath(s);
-    return 1;
   case SVG_OP_ARC:
   case SVG_OP_ARCN:
   {
@@ -3850,14 +4145,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   case SVG_OP_FILL:
     svg_ps_emit_path(s, 0, 1);
     return 1;
-  case SVG_OP_SETRGBCOLOR:
-    c = svg_ps_pop(s); b = svg_ps_pop(s); a = svg_ps_pop(s);
-    svg_ps_set_rgb(s, a, b, c);
-    return 1;
-  case SVG_OP_SETGRAY:
-    a = svg_ps_pop(s);
-    svg_ps_set_rgb(s, a, a, a);
-    return 1;
+  /* SETRGBCOLOR / SETGRAY route through svg_op_handlers[] above.           */
   case SVG_OP_SETHSBCOLOR:
     (void) svg_ps_pop(s); (void) svg_ps_pop(s); (void) svg_ps_pop(s);
     return 1;
@@ -3872,10 +4160,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       (1.0 - yy) * (1.0 - kk));
     return 1;
   }
-  case SVG_OP_SETLINEWIDTH:
-    a = svg_ps_pop(s);
-    s->gs[s->gs_top].line_width = a / (double) PT;
-    return 1;
+  /* SETLINEWIDTH routes through svg_op_handlers[] above.                   */
   case SVG_OP_SETLINECAP:
   {
     /* PS encoding: 0=butt 1=round 2=square.  Stored verbatim; emitted as  */
@@ -3962,7 +4247,10 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     }
     return 1;
   }
-  case SVG_OP_GSAVE:
+  /* GSAVE / GRESTORE route through svg_op_handlers[] above.  SAVE keeps    */
+  /* its own case here because the op_id-dependent sentinel push differs    */
+  /* from gsave; conditionally pushing inside the fast handler would dilute */
+  /* its tightness.                                                         */
   case SVG_OP_SAVE:
     /* PS `save` snapshots the entire VM (graphics, dict, allocation modes)  */
     /* and pushes a save-object on the operand stack.  z53.c's interpreter   */
@@ -3976,7 +4264,6 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       s->gs[s->gs_top + 1] = s->gs[s->gs_top];
       s->gs_top++;
     }
-    if( op_id == SVG_OP_SAVE )
     {
       svg_value sv;
       sv.kind = SVG_VK_NULL;
@@ -3987,9 +4274,6 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
       sv.dict_id = 0;
       svg_ps_push(s, &sv);
     }
-    return 1;
-  case SVG_OP_GRESTORE:
-    if( s->gs_top > 0 ) s->gs_top--;
     return 1;
   case SVG_OP_RESTORE:
     /* PS `restore` consumes the save-object on top of the stack and       */
@@ -6267,16 +6551,31 @@ static void SVG_LinkDest(OBJECT name, FULL_LENGTH llx, FULL_LENGTH lly,
   FULL_LENGTH urx, FULL_LENGTH ury)
 {
   char idbuf[256];
+  char out[512];
+  char *p;
+  const char *q, *r;
   double x_pt, y_pt;
   if( out_fp == NULL || !page_open || name == NULL )
     return;
   svg_emit_link_id(name, idbuf, sizeof idbuf);
   x_pt = (double) llx / PT;
   y_pt = (double) ury / PT;
-  fprintf(out_fp,
-    "<a id=\"%s\"><rect x=\"%.3f\" y=\"%.3f\" width=\"0\" height=\"0\" "
-    "fill=\"none\"/></a>\n",
-    idbuf, x_pt, y_pt);
+  /* Hand-rolled emission: gprof flagged this fprintf at ~4.6% / 0.85 s on  */
+  /* the User's Guide build because every link target hits it.              */
+  p = out;
+  q = "<a id=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  for( r = idbuf; *r != '\0'; r++ )
+    *p++ = *r;
+  q = "\"><rect x=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_ftoa3(x_pt, p);
+  q = "\" y=\"";
+  while( *q != '\0' ) *p++ = *q++;
+  p += svg_ftoa3(y_pt, p);
+  q = "\" width=\"0\" height=\"0\" fill=\"none\"/></a>\n";
+  while( *q != '\0' ) *p++ = *q++;
+  fwrite(out, 1, (size_t) (p - out), out_fp);
 }
 
 
