@@ -6,6 +6,69 @@ PS back-end is FROZEN; this is purely additive work. The output target
 is byte-for-byte feature parity at the drawing level: every PS drawing
 operation must have an SVG equivalent.
 
+## v0.3.0 baseline
+
+Status as of the v0.3.0 cut:
+
+- User's Guide build (`doc/user/all`): mean SSIM ~0.95 against the
+  PostScript reference (post-#208 rebuild estimate; full-corpus
+  re-raster pending).
+- Regression corpus: 95 snippets through `tests/run_all.sh`.
+- Single-pass UG build time: 22.6 s wall (`lout -I ../../include -I . -G all`),
+  see `SVG_PERFORMANCE.md` section 1.1 for the cumulative speedup
+  ladder that led here.
+
+The PS pipeline (`--format=pdf`) remains bit-identical to the
+pre-z53.c era; v0.3.0 work was confined to z53.c, z53_glyph.c, and
+auxiliary AFM/GSUB plumbing.
+
+## Shipped through v0.3.0
+
+Items previously called out in the porting plan or in "Remaining
+known issues" that have landed on `svg-backend` for v0.3.0.  SHAs
+refer to `jclements3/lout` `svg-backend`.
+
+Glyph coverage and text rendering:
+
+- Adobe Symbol glyph table extension -- closes the @Sym / @Char gap
+  audited 2026-05-21 (Greek, math operators, fences, arrows, suits);
+  also adds the @Graph plot-symbol dispatch fix that had been folded
+  into the same change (`ec987be`).
+- Type 1 (`.pfb`) glyph outlines for `charpath` / small-caps emission
+  (`78244cc`).
+- CFF / OTF Type 2 charstring outlines (`b021b71`).
+- TrueType `glyf` outlines (`50ebec5`).
+- GSUB `smcp` / `onum` parser, phase 1 (`f5533e6`) and consumer that
+  emits substituted glyphs as `<path>` (`8f6c536`).
+- AFM kern-pair ingestion (`fc94e3c`) plus precomputed per-font
+  256x256 kern table for O(1) lookup (`cf77e83`).
+- `fi` / `fl` / `ffi` / `ffl` ligature substitution folded onto
+  U+FB01..FB04 for AT serif faces (`4213af3`).
+- `xml:space="preserve"` predicate for whitespace-significant
+  `<text>` runs (`069d60e`).
+- SVG `<textPath>` emission for curve-following text after `curveto`
+  (`60405f9`).
+
+PS-interpreter and graphics state:
+
+- gsave / grestore now snapshot the current path -- the v0.3.0
+  headline fix; restores correct path semantics inside nested
+  `@Graphic` bodies (`6688249`).
+- `SVG_DefineGraphicNames` propagates the current font into the PS
+  interpreter (`c9142c1`).
+- Linecap, linejoin, and miterlimit attribute emission, plus
+  save/restore and linewidth aliases (`a3e9d04`).
+- `svg_graphic_concat` spacing fix -- whitespace boundary handling
+  when concatenating @Graphic token streams (`346b335`, same commit
+  as the next item).
+- `currentColor` fold for default-black ink -- emits
+  `fill="currentColor"` for the document-default black so a parent
+  CSS rule can re-tint without re-emission (`346b335`).
+
+Cross-reference `SVG_PERFORMANCE.md` for the timing-side impact of
+these changes (the GSUB parser, kern-table, and Type-1/CFF/TT outline
+loaders all show up there).
+
 ## 1. Overview
 
 `lout/z49.c` (2274 lines) defines `PS_BackEnd`, a pointer to a
@@ -659,6 +722,45 @@ user-guide build now emits ~2200 `stroke-width=0.48` paths (vs. ~80
 before the fix) and pool_used stays under 20 indefinitely.
 
 ### Remaining known issues
+
+As of v0.3.0 the live open list (everything else in this section
+below is historical context for items that have since shipped --
+see "Shipped through v0.3.0" near the top of this document):
+
+1. **Cross-token kerning for tokenised `@Code`.** Deferred and
+   documented in detail under "Cross-token kerning for tokenised
+   `@Code` (deferred 2026-05-23)" below.  The analysis there
+   concludes the expected SSIM gain is small (~+0.005 to +0.01 on
+   slides p032) and the implementation risks regressing same-font
+   runs Lout already laid out correctly.  Revisit only if a future
+   renderer disagreement makes the case load-bearing.
+
+2. **More aggressive `@Graphic` raw-PS to SVG translation.**  The
+   PS-to-SVG interpreter inside `z53.c` (`svg_ps_exec_op`) covers
+   the ~175 operators that Lout's standard library actually emits,
+   plus the dispatch ladder over `@Graph` plot-symbol names.  The
+   long tail of unimplemented PS ops (`image` / `imagemask` /
+   `colorimage`, `flattenpath` / `reversepath` / `pathbbox` outside
+   the narrow `charpath flattenpath pathbbox` idiom, full
+   `setoverprint` / `setstrokeadjust` honouring, the wider
+   dictionary / file-IO operators) still falls through to the XML-
+   comment placeholder.  No in-tree document exercises any of
+   these, but user-authored `@Graphic` bodies can; expand the
+   interpreter case-by-case as real workloads surface.
+
+3. **Shared rasteriser for true pixel parity.**  Out of scope for
+   v0.3.0.  The remaining SSIM floor on text-heavy User's Guide
+   pages (see `tests/user_guide_diff/README.md` "SSIM vs AE") is
+   dominated by Ghostscript-vs-librsvg disagreement on glyph
+   antialiasing for the same AFM metrics, not by anything z53.c
+   emits.  A genuine fix requires either driving both back-ends
+   through the same rasteriser (Ghostscript via `-sDEVICE=svg`, or
+   rsvg-convert with an embedded `@font-face`-backed font) or
+   embedding woff2 copies of the AT fonts.  Both depend on
+   Ghostscript / librsvg upstream work and are deferred.
+
+Historical context (items below this point either shipped in
+v0.3.0 or remain documented for the design rationale).
 
 - Texture patterns (`LoutMakeTexture`/`LoutSetTexture` now pop operands
   but still ignore the texture body): `@Box paint{black} texture{brickwork}`
