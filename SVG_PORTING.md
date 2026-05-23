@@ -884,3 +884,70 @@ this round.
   `tests/snippets/text_oldstyle_figures.lt` exercise the surrounding
   text path but currently render lining figures and lower-case in
   both back-ends (parser-only, consumer is the deferred work).
+
+### Cross-token kerning for tokenised `@Code` (deferred 2026-05-23)
+
+`lout/doc/slides` page 32 (the Pascal `DoPriAbstract` listing) renders
+at SSIM 0.9731 against the PostScript reference; #188 hypothesised
+this was caused by lost kerning between adjacent same-font tokens
+emitted as separate `<text>` elements (e.g. consecutive Times-Bold
+keywords `nil`, `then`, `begin` on the same line).
+
+Investigation (slides p032).  The @Code block tokenises into 70
+`<text>` elements.  A scan for adjacent same-style same-baseline
+pairs found 6 candidates, of which only 2 are truly abutting:
+
+  y=370.1: x=242.2 "nil" -> x=269.0 "then"  (dx=26.75pt, "nil"
+                                              width ~26.7pt, gap <1pt)
+  y=370.1: x=269.0 "then" -> x=311.4 "begin" (dx=42.40pt, "then"
+                                              width ~38pt, gap ~4pt)
+
+The remaining 4 candidates have whitespace-sized gaps (>20pt for a
+3-character predecessor at 20pt) so are not adjacency cases.  Within
+each token Lout already emits kern offsets as `<tspan dx="...">`
+(commit fc94e3c), which the SVG renderer applies correctly.
+
+Why merging is not a clear win.  SVG fundamentally couples explicit
+positioning and automatic kerning: any glyph or `<tspan>` with an
+explicit `x` attribute resets the rendering position and disables
+kerning across that boundary (SVG 1.1 ChapText, "x attribute").
+Therefore:
+
+  Option A -- merge adjacent tokens, drop the second `<text>`'s
+  explicit x, let the renderer's advance carry over.  Gains
+  cross-token kerning but loses Lout's pre-computed gap; the
+  renderer's idea of "nil"'s advance may differ from Lout's by a
+  fraction of a point, propagating drift along the entire merged
+  run.
+
+  Option B -- merge into one `<text>` but emit each token as
+  `<tspan dx="lout_gap_relative_to_renderer_position">`.  We do not
+  know the renderer's position because we did not compute it; the
+  best approximation is `lout_gap = (lout_x_2 - lout_x_1) -
+  approximate_width(token_1)` using Lout's AFM, but that
+  reintroduces the metric mismatch we were trying to avoid.
+
+  Option C -- emit `<tspan x="absolute_x">` per token.  Loses the
+  kerning we wanted to gain (the explicit x resets position) AND
+  costs the per-token `<text>` framing overhead -- pure regression.
+
+Why the diff image is not really about cross-token kerning.  The
+p032 PS-vs-SVG diff overlay highlights almost every character on
+every code line, not just the 2-3 truly-adjacent token boundaries.
+The dominant signal is per-glyph metric disagreement between
+Ghostscript (PS reference) and librsvg (SVG raster) for the same
+AFM-defined font.  This is the same antialiasing-and-metric floor
+documented at length in `tests/user_guide_diff/README.md` "SSIM vs
+AE", and is not addressable in the back-end emitter.
+
+Conclusion.  Deferred.  Estimated SSIM gain from a correct
+implementation of Option A on p032 specifically is small (~+0.005
+to +0.01, from 0.9731 to ~0.978-0.985) and is offset by the risk
+of introducing new positioning errors on every same-font run that
+Lout already laid out correctly.  If the cross-token case becomes
+load-bearing later (e.g. a tcc-built lout with mismatched AFM
+gets a renderer that disagrees more aggressively), the right
+implementation is Option A gated on `lout_gap < epsilon` -- i.e.
+only merge when Lout placed two tokens at literally the same
+position, where the renderer's advance disagreement is bounded by
+the kern table itself.
