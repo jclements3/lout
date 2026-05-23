@@ -1429,10 +1429,13 @@ static int svg_glyph_run_cs(svg_glyph_emit_ctx *c, svg_glyph_font *f,
 static int svg_glyph_run_cff_cs(svg_glyph_emit_ctx *c, svg_glyph_font *f,
   const unsigned char *cs, int len);
 
-int svg_glyph_emit_outline(
-  const char *ps_font_name,
-  const char *glyph_name,
-  double font_size_units,    /* multiplier already in caller's path units    */
+/* Shared core: emit a single glyph entry's outline.  Used by the two       */
+/* public wrappers (by-name and by-GID).  All scaling / coord-translation   */
+/* logic lives here; the wrappers only locate the entry.                    */
+static int svg_glyph_emit_outline_core(
+  svg_glyph_font *f,
+  const svg_glyph_entry *g,
+  double font_size_units,
   double x0, double y0,
   double *advance_out,
   void *user,
@@ -1441,19 +1444,8 @@ int svg_glyph_emit_outline(
   void (*cb_curve)(void *, double, double, double, double, double, double),
   void (*cb_close)(void *))
 {
-  int fi;
-  svg_glyph_font *f;
-  const svg_glyph_entry *g;
   svg_glyph_emit_ctx ctx;
   int r;
-
-  if( getenv("LOUT_NO_GLYPH_OUTLINES") != NULL ) return 0;
-
-  fi = svg_glyph_load_font(ps_font_name);
-  if( fi < 0 ) return 0;
-  f = &svg_glyph_fonts[fi];
-  g = svg_glyph_find_glyph(f, glyph_name);
-  if( g == NULL ) return 0;
 
   memset(&ctx, 0, sizeof ctx);
   ctx.user  = user;
@@ -1499,6 +1491,77 @@ int svg_glyph_emit_outline(
   if( advance_out != NULL )
     *advance_out = ctx.adv_x * ctx.scale;
   return 1;
+}
+
+int svg_glyph_emit_outline(
+  const char *ps_font_name,
+  const char *glyph_name,
+  double font_size_units,    /* multiplier already in caller's path units    */
+  double x0, double y0,
+  double *advance_out,
+  void *user,
+  void (*cb_move)(void *, double, double),
+  void (*cb_line)(void *, double, double),
+  void (*cb_curve)(void *, double, double, double, double, double, double),
+  void (*cb_close)(void *))
+{
+  int fi;
+  svg_glyph_font *f;
+  const svg_glyph_entry *g;
+
+  if( getenv("LOUT_NO_GLYPH_OUTLINES") != NULL ) return 0;
+
+  fi = svg_glyph_load_font(ps_font_name);
+  if( fi < 0 ) return 0;
+  f = &svg_glyph_fonts[fi];
+  g = svg_glyph_find_glyph(f, glyph_name);
+  if( g == NULL ) return 0;
+
+  return svg_glyph_emit_outline_core(f, g, font_size_units, x0, y0,
+    advance_out, user, cb_move, cb_line, cb_curve, cb_close);
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  Public entry point: emit a glyph's outline indexed by GID.  Used by the */
+/*  SVG back-end's GSUB consumer path (svg_emit_word_text in z53.c) which   */
+/*  receives substituted GIDs from svg_glyph_font_smcp_substitute /         */
+/*  _onum_substitute.  The GID is an index into f->glyphs[] -- the same    */
+/*  index returned by svg_glyph_name_to_gid() for the source glyph.         */
+/*                                                                           */
+/*  Returns 1 on success with *advance_out populated, 0 on any failure      */
+/*  (font not loaded, GID out of range, decode error).                      */
+/*                                                                           */
+/*****************************************************************************/
+
+int svg_glyph_emit_outline_gid(
+  const char *ps_font_name,
+  unsigned int gid,
+  double font_size_units,
+  double x0, double y0,
+  double *advance_out,
+  void *user,
+  void (*cb_move)(void *, double, double),
+  void (*cb_line)(void *, double, double),
+  void (*cb_curve)(void *, double, double, double, double, double, double),
+  void (*cb_close)(void *))
+{
+  int fi;
+  svg_glyph_font *f;
+  const svg_glyph_entry *g;
+
+  if( getenv("LOUT_NO_GLYPH_OUTLINES") != NULL ) return 0;
+
+  fi = svg_glyph_load_font(ps_font_name);
+  if( fi < 0 ) return 0;
+  f = &svg_glyph_fonts[fi];
+  if( (int) gid >= f->nglyphs ) return 0;
+  g = &f->glyphs[gid];
+  if( g->cs == NULL || g->cs_len <= 0 ) return 0;
+
+  return svg_glyph_emit_outline_core(f, g, font_size_units, x0, y0,
+    advance_out, user, cb_move, cb_line, cb_curve, cb_close);
 }
 
 
@@ -2548,8 +2611,27 @@ int svg_glyph_font_smcp_substitute(const char *ps_name, unsigned int cp)
   if( ps_name == NULL || cp >= 256 ) return 0;
   fi = svg_glyph_load_font(ps_name);
   if( fi < 0 ) return 0;
-  if( !svg_glyph_fonts[fi].has_smcp ) return 0;
-  return (int) svg_glyph_fonts[fi].smcp_subst[cp];
+  if( svg_glyph_fonts[fi].has_smcp )
+    return (int) svg_glyph_fonts[fi].smcp_subst[cp];
+  /* Synthetic fall-back for testing the consumer-side path on Type 1       */
+  /* fonts that have no GSUB.  Triggered only when                          */
+  /* LOUT_SVG_FONT_FEATURES_SYNTH=smcp (or "smcp,onum") is set in the       */
+  /* environment.  The synthetic rule maps each lowercase 'a'..'z' to its   */
+  /* uppercase counterpart's glyph entry, so a Type 1 Times-Roman document  */
+  /* still exercises the outline emission path.  Returns 0 (no             */
+  /* substitution) if SYNTH isn't requested, isn't lowercase, or the       */
+  /* uppercase glyph isn't found.                                           */
+  {
+    const char *synth = getenv("LOUT_SVG_FONT_FEATURES_SYNTH");
+    char name[2];
+    int gid;
+    if( synth == NULL || strstr(synth, "smcp") == NULL ) return 0;
+    if( cp < 'a' || cp > 'z' ) return 0;
+    name[0] = (char) (cp - 'a' + 'A');
+    name[1] = '\0';
+    gid = svg_glyph_name_to_gid(&svg_glyph_fonts[fi], name);
+    return gid < 0 ? 0 : gid;
+  }
 }
 
 int svg_glyph_font_onum_substitute(const char *ps_name, unsigned int cp)
@@ -2558,8 +2640,23 @@ int svg_glyph_font_onum_substitute(const char *ps_name, unsigned int cp)
   if( ps_name == NULL || cp >= 256 ) return 0;
   fi = svg_glyph_load_font(ps_name);
   if( fi < 0 ) return 0;
-  if( !svg_glyph_fonts[fi].has_onum ) return 0;
-  return (int) svg_glyph_fonts[fi].onum_subst[cp];
+  if( svg_glyph_fonts[fi].has_onum )
+    return (int) svg_glyph_fonts[fi].onum_subst[cp];
+  /* Synthetic test fall-back: maps digits to their named-glyph entries     */
+  /* (zero, one, ...).  Same outline as the regular figure on a Type 1      */
+  /* font -- exists only so the test snippet can exercise the consumer    */
+  /* outline emission path under LOUT_SVG_FONT_FEATURES_SYNTH=onum.        */
+  {
+    static const char *digit_names[10] = {
+      "zero","one","two","three","four","five","six","seven","eight","nine"
+    };
+    const char *synth = getenv("LOUT_SVG_FONT_FEATURES_SYNTH");
+    int gid;
+    if( synth == NULL || strstr(synth, "onum") == NULL ) return 0;
+    if( cp < '0' || cp > '9' ) return 0;
+    gid = svg_glyph_name_to_gid(&svg_glyph_fonts[fi], digit_names[cp - '0']);
+    return gid < 0 ? 0 : gid;
+  }
 }
 
 int svg_glyph_font_has_feature(const char *ps_name, const char *tag4)

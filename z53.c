@@ -258,24 +258,86 @@ extern int svg_glyph_emit_outline(
   void (*cb_curve)(void *, double, double, double, double, double, double),
   void (*cb_close)(void *));
 
+/* Glyph-outline service by GID (z53_glyph.c).  Used by the consumer side  */
+/* of GSUB substitution: callers compute a substituted GID via             */
+/* svg_glyph_font_smcp_substitute (etc.) and feed it back through this    */
+/* entry point to emit the outline of the substituted glyph.              */
+extern int svg_glyph_emit_outline_gid(
+  const char *ps_font_name,
+  unsigned int gid,
+  double font_size_units,
+  double x0, double y0,
+  double *advance_out,
+  void *user,
+  void (*cb_move)(void *, double, double),
+  void (*cb_line)(void *, double, double),
+  void (*cb_curve)(void *, double, double, double, double, double, double),
+  void (*cb_close)(void *));
+
 /* OpenType GSUB feature substitution service implemented in z53_glyph.c.   */
 /* For CFF/OTF fonts only (Type 1 PFB has no GSUB; TrueType GSUB is         */
 /* deferred).  Returns the substituted glyph-id within the CFF (>0) or 0   */
-/* if no substitution applies.  Currently parsed but not consumed at       */
-/* <text> emission time -- see the deferral comment on svg_emit_word_text  */
-/* below for the architectural reason.                                      */
+/* if no substitution applies.  Phase 2 (this revision) consumes the      */
+/* result inside svg_emit_word_text when LOUT_SVG_FONT_FEATURES is set:    */
+/* substituted glyphs are emitted as <path> outlines, non-substituted     */
+/* glyphs stay on the <text> path.  See svg_emit_word_text below.         */
 extern int svg_glyph_font_smcp_substitute(const char *ps_name,
   unsigned int cp);
 extern int svg_glyph_font_onum_substitute(const char *ps_name,
   unsigned int cp);
 extern int svg_glyph_font_has_feature(const char *ps_name, const char *tag4);
 
-/* Font-features hint bits stored on the active svg_gstate.  These are      */
-/* declarative -- a future change can wire them through to GSUB-driven    */
-/* glyph emission.  Phase 1 leaves them as a no-op pass-through; they      */
-/* default to 0 (no features) on every gstate init / gsave.                */
+/* Font-features hint bits stored on the active svg_gstate.  Set per        */
+/* document at SVG_PrintInitialize from the LOUT_SVG_FONT_FEATURES env var */
+/* (comma-separated list of "smcp" / "onum" tokens).  When non-zero, the   */
+/* word-emission path scans each byte for a GSUB substitution and routes   */
+/* substituted glyphs through <path> emission rather than <text>.          */
 #define SVG_FONT_FEATURE_SMCP   0x0001u
 #define SVG_FONT_FEATURE_ONUM   0x0002u
+
+/* Active text-emission feature mask for the current document.  File-static */
+/* so the body-text emitter can consult it without going through the PS    */
+/* interpreter's gstate (that one only governs raw-PS @Graphic bodies).    */
+/* Initialised once per document in SVG_PrintInitialize.                    */
+static unsigned int svg_text_features = 0;
+
+/* Parse LOUT_SVG_FONT_FEATURES (comma-separated, e.g. "smcp,onum") into    */
+/* an SVG_FONT_FEATURE_* mask.  Unknown tokens are silently ignored so the */
+/* env var stays forward-compatible with future features.                  */
+static unsigned int svg_parse_text_features_env(void)
+{
+  const char *env;
+  unsigned int mask;
+  const char *p;
+  env = getenv("LOUT_SVG_FONT_FEATURES");
+  if( env == NULL ) return 0;
+  mask = 0;
+  p = env;
+  while( *p != '\0' )
+  {
+    /* Skip leading separators (commas, whitespace).                        */
+    while( *p == ',' || *p == ' ' || *p == '\t' ) p++;
+    if( *p == '\0' ) break;
+    if( strncmp(p, "smcp", 4) == 0 &&
+        (p[4] == '\0' || p[4] == ',' || p[4] == ' ' || p[4] == '\t') )
+    {
+      mask |= SVG_FONT_FEATURE_SMCP;
+      p += 4;
+    }
+    else if( strncmp(p, "onum", 4) == 0 &&
+        (p[4] == '\0' || p[4] == ',' || p[4] == ' ' || p[4] == '\t') )
+    {
+      mask |= SVG_FONT_FEATURE_ONUM;
+      p += 4;
+    }
+    else
+    {
+      /* Skip unknown token to the next separator.                          */
+      while( *p != '\0' && *p != ',' && *p != ' ' && *p != '\t' ) p++;
+    }
+  }
+  return mask;
+}
 
 /* Static 128 KB buffer for out_fp.  Kept here (not on the stack inside     */
 /* SVG_PrintInitialize) because setvbuf documents that the supplied buffer */
@@ -312,6 +374,11 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
   /* Reset the textPath def-id counter so two consecutive document builds  */
   /* in the same process produce identical SVG output.                     */
   svg_textpath_id_next = 0;
+  /* Activate OpenType font-features for body-text emission if the         */
+  /* document requested them via the LOUT_SVG_FONT_FEATURES env var.       */
+  /* The env var is the only activation path in phase 2 -- mdlout's       */
+  /* frontmatter font-features key sets it in the child Lout process.     */
+  svg_text_features = svg_parse_text_features_env();
   if( out_fp != NULL )
   {
     /* Larger fully-buffered I/O.  Safe to call before any writes; the      */
@@ -1361,18 +1428,17 @@ static unsigned int svg_match_ligature(const FULL_CHAR *p, int *consumed)
 /*  ('i' or 'l') as the left member of the next kern pair -- the same       */
 /*  spacing PostScript would have computed against the digram's right edge. */
 /*                                                                           */
-/*  OpenType GSUB (smcp / onum, phase 1): the gstate carries a              */
-/*  font_features bitmask that requests OpenType feature substitution.       */
-/*  The substitution tables for CFF/OTF fonts are populated at font-load    */
-/*  time by z53_glyph.c's GSUB parser (svg_glyph_otf_parse_gsub) and        */
-/*  reachable via svg_glyph_font_smcp_substitute / _onum_substitute.  The   */
-/*  consumer side is NOT yet wired through this function: small-caps      */
-/*  glyphs and old-style figures have no Unicode codepoint of their own,   */
-/*  so the substituted GIDs cannot be referenced by the current <text>     */
-/*  emission path.  The architectural follow-up is to switch body text on  */
-/*  these features over to glyph-path emission (already supported by      */
-/*  z53_glyph.c for charpath).  Until then svg_emit_word_text ignores the  */
-/*  font-features hint -- it is recorded but not consumed.                 */
+/*  OpenType GSUB (smcp / onum, phase 2): the document-level                 */
+/*  svg_text_features mask (set from LOUT_SVG_FONT_FEATURES at              */
+/*  SVG_PrintInitialize) controls whether body text consults GSUB.  When   */
+/*  set, SVG_PrintWord pre-scans the word string for any byte with an      */
+/*  active substitution; if any is found it routes the entire word         */
+/*  through svg_emit_word_paths instead of the <text> path here.  The     */
+/*  substituted glyphs have no Unicode codepoint, so <text> cannot         */
+/*  reference them; <path d="..."> with the actual glyph outline is the    */
+/*  workaround.  Words that hit no substitution still take the normal     */
+/*  <text> path so kerning, ligatures, and selectable text continue to    */
+/*  work for the rest of the document.                                     */
 /*                                                                           */
 /*****************************************************************************/
 
@@ -1497,6 +1563,229 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
     svg_emit_utf8(cp);
     prev_byte = (FULL_CHAR) *p;
     p++;
+  }
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  GSUB consumer side: emit a word's glyphs as <path d="..."/> outlines     */
+/*  rather than <text>.  Used when LOUT_SVG_FONT_FEATURES requested smcp or */
+/*  onum and at least one byte of the word has an active substitution.     */
+/*                                                                           */
+/*  Each glyph is fed to svg_glyph_emit_outline_gid (substituted) or         */
+/*  svg_glyph_emit_outline (regular, by Adobe glyph name).  The callbacks  */
+/*  accumulate a single SVG d-attribute path string in a per-call buffer.   */
+/*  After the glyph is fully decoded, we emit one <path d="..." fill=..>    */
+/*  element and advance the cursor by the glyph's reported advance.         */
+/*                                                                           */
+/*  Glyphs with no decodable outline (no font loaded, glyph absent, T1      */
+/*  without that glyph) are skipped silently and the cursor advances by a   */
+/*  fudged half-em so the rest of the word still lays out roughly right.   */
+/*                                                                           */
+/*****************************************************************************/
+
+#define SVG_GLYPH_PATH_BUF_SIZE 8192
+
+/* Forward declaration: svg_ascii_glyph_name is defined later in the file   */
+/* alongside the PS-interpreter charpath helpers.  Hoist a prototype so    */
+/* svg_emit_word_paths (defined here) can call it.                          */
+static const char *svg_ascii_glyph_name(unsigned int c);
+
+typedef struct svg_path_emit_ctx {
+  char  *buf;
+  int    cap;
+  int    len;
+  int    has_geom;
+} svg_path_emit_ctx;
+
+static void svg_path_buf_putc(svg_path_emit_ctx *c, char ch)
+{
+  if( c->len + 1 < c->cap )
+    c->buf[c->len++] = ch;
+}
+
+static void svg_path_buf_puts(svg_path_emit_ctx *c, const char *s)
+{
+  while( *s != '\0' && c->len + 1 < c->cap )
+    c->buf[c->len++] = *s++;
+}
+
+static void svg_path_buf_putn(svg_path_emit_ctx *c, double v)
+{
+  char tmp[32];
+  int n;
+  n = svg_ftoa3(v, tmp);
+  if( c->len + n >= c->cap ) return;
+  memcpy(c->buf + c->len, tmp, (size_t) n);
+  c->len += n;
+}
+
+static void svg_path_cb_move(void *u, double x, double y)
+{
+  svg_path_emit_ctx *c = (svg_path_emit_ctx *) u;
+  if( c->has_geom ) svg_path_buf_putc(c, ' ');
+  svg_path_buf_putc(c, 'M');
+  svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, x);
+  svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, y);
+  c->has_geom = 1;
+}
+
+static void svg_path_cb_line(void *u, double x, double y)
+{
+  svg_path_emit_ctx *c = (svg_path_emit_ctx *) u;
+  svg_path_buf_puts(c, " L ");
+  svg_path_buf_putn(c, x);
+  svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, y);
+}
+
+static void svg_path_cb_curve(void *u,
+  double x1, double y1, double x2, double y2, double x3, double y3)
+{
+  svg_path_emit_ctx *c = (svg_path_emit_ctx *) u;
+  svg_path_buf_puts(c, " C ");
+  svg_path_buf_putn(c, x1); svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, y1); svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, x2); svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, y2); svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, x3); svg_path_buf_putc(c, ' ');
+  svg_path_buf_putn(c, y3);
+}
+
+static void svg_path_cb_close(void *u)
+{
+  svg_path_emit_ctx *c = (svg_path_emit_ctx *) u;
+  svg_path_buf_puts(c, " Z");
+}
+
+/* Resolve fnum to the underlying PostScript font name (e.g. "Times-Roman" */
+/* rather than Lout's internal handle "fnt1" or the FontFamily "Times").  */
+/* Mirrors the navigation in z37.c:FontPrintAll where ps_name is the      */
+/* first child of the face object.  Returns NULL on failure.              */
+static const char *svg_resolve_ps_name(FONT_NUM fnum)
+{
+  OBJECT face, ps_name;
+  if( fnum <= 0 ) return NULL;
+  if( finfo == NULL || finfo[fnum].font_table == nilobj ) return NULL;
+  Parent(face, Up(finfo[fnum].font_table))
+    ;
+  if( face == nilobj || !is_word(type(face)) ) return NULL;
+  Child(ps_name, Down(face))
+    ;
+  if( ps_name == nilobj || !is_word(type(ps_name)) ) return NULL;
+  return (const char *) string(ps_name);
+}
+
+/* Scan the word for at least one byte with an active substitution under   */
+/* the current svg_text_features mask.  Returns 1 if path-mode emission   */
+/* should be used for this word, 0 otherwise.  ps_name is the font's       */
+/* PostScript name (e.g. "Times-Roman") -- the substitution check         */
+/* transparently no-ops for Type 1 fonts that ship no GSUB.                */
+static int svg_word_has_substitution(const char *ps_name,
+  const FULL_CHAR *s, unsigned int features)
+{
+  const FULL_CHAR *p;
+  unsigned int b;
+  if( ps_name == NULL || s == NULL || features == 0 ) return 0;
+  for( p = s; *p != '\0'; p++ )
+  {
+    b = (unsigned int) *p;
+    if( (features & SVG_FONT_FEATURE_SMCP) && b >= 'a' && b <= 'z' )
+    {
+      if( svg_glyph_font_smcp_substitute(ps_name, b) != 0 ) return 1;
+    }
+    if( (features & SVG_FONT_FEATURE_ONUM) && b >= '0' && b <= '9' )
+    {
+      if( svg_glyph_font_onum_substitute(ps_name, b) != 0 ) return 1;
+    }
+  }
+  return 0;
+}
+
+/* Emit one glyph's outline as a <path>.  fill_str is the SVG fill colour. */
+/* Returns the glyph's actual advance in pt (0 if the outline couldn't be */
+/* emitted -- caller may fall back to an estimated advance).               */
+static double svg_emit_one_glyph_path(const char *ps_name,
+  unsigned int gid, const char *glyph_name,
+  double font_size_pt, double cx_pt, const char *fill_str)
+{
+  static char path_buf[SVG_GLYPH_PATH_BUF_SIZE];
+  svg_path_emit_ctx ctx;
+  double advance = 0.0;
+  int ok;
+
+  ctx.buf = path_buf;
+  ctx.cap = SVG_GLYPH_PATH_BUF_SIZE;
+  ctx.len = 0;
+  ctx.has_geom = 0;
+  path_buf[0] = '\0';
+
+  if( gid != 0 )
+  {
+    ok = svg_glyph_emit_outline_gid(ps_name, gid, font_size_pt,
+      cx_pt, 0.0, &advance, (void *) &ctx,
+      svg_path_cb_move, svg_path_cb_line,
+      svg_path_cb_curve, svg_path_cb_close);
+  }
+  else if( glyph_name != NULL )
+  {
+    ok = svg_glyph_emit_outline(ps_name, glyph_name, font_size_pt,
+      cx_pt, 0.0, &advance, (void *) &ctx,
+      svg_path_cb_move, svg_path_cb_line,
+      svg_path_cb_curve, svg_path_cb_close);
+  }
+  else
+    ok = 0;
+
+  if( !ok || ctx.len == 0 ) return 0.0;
+  /* Null-terminate.  svg_path_buf_putc keeps one byte of slack.            */
+  path_buf[ctx.len] = '\0';
+
+  fputs("<path d=\"", out_fp);
+  fwrite(path_buf, 1, (size_t) ctx.len, out_fp);
+  fputs("\" fill=\"", out_fp);
+  fputs(fill_str, out_fp);
+  fputs("\"/>", out_fp);
+  return advance;
+}
+
+/* Emit a word as <path> outlines instead of <text>.  Caller arranges the */
+/* enclosing <g transform="matrix(1 0 0 -1 x_pt y_pt)"> so paths inside  */
+/* use a local frame with glyph origin (0, 0) at the baseline.            */
+static void svg_emit_word_paths(const char *ps_name, FULL_CHAR *s,
+  double size_pt, const char *fill_str, unsigned int features)
+{
+  const FULL_CHAR *p;
+  double cx_pt = 0.0;
+  double adv;
+  unsigned int b;
+  unsigned int gid;
+  const char *gname;
+
+  if( s == NULL || ps_name == NULL ) return;
+  for( p = s; *p != '\0'; p++ )
+  {
+    b = (unsigned int) *p;
+    gid = 0;
+    if( (features & SVG_FONT_FEATURE_SMCP) && b >= 'a' && b <= 'z' )
+      gid = (unsigned int) svg_glyph_font_smcp_substitute(ps_name, b);
+    if( gid == 0 && (features & SVG_FONT_FEATURE_ONUM)
+        && b >= '0' && b <= '9' )
+      gid = (unsigned int) svg_glyph_font_onum_substitute(ps_name, b);
+
+    /* If no substitution, render the regular glyph from the font (by      */
+    /* Adobe glyph name).  Both branches end up as <path>; the substituted */
+    /* branch picks the small-caps / old-style figure GID.                  */
+    gname = (gid != 0) ? NULL : svg_ascii_glyph_name(b);
+    adv = svg_emit_one_glyph_path(ps_name, gid, gname, size_pt, cx_pt,
+      fill_str);
+    if( adv > 0.0 )
+      cx_pt += adv;
+    else
+      cx_pt += size_pt * 0.5;  /* fudge for unrenderable glyph             */
   }
 }
 
@@ -1715,6 +2004,39 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
     colour_str = "currentColor";
   else if( colour_str == NULL )
     colour_str = "currentColor";
+
+  /* GSUB consumer: when the document requested OpenType font-features and  */
+  /* this word's font has at least one byte with an active substitution,    */
+  /* route the entire word through <path> emission so the substituted GIDs */
+  /* (which have no Unicode codepoint) can be rendered.  Words that hit no */
+  /* substitution stay on the <text> path below.  FontName() returns the   */
+  /* full PostScript name ("Times-Roman", not "Times") which is what the   */
+  /* outline service expects -- FontFamily would miss the .pfb mapping.    */
+  if( svg_text_features != 0 )
+  {
+    const char *psn = svg_resolve_ps_name(fnum);
+    if( psn != NULL && svg_word_has_substitution(psn,
+          string(x), svg_text_features) )
+    {
+      char hdr[256];
+      char *p = hdr;
+      const char *q;
+      /* Same counter-flip transform as the <text> branch below; paths     */
+      /* inside use a local frame with glyph origin (0, 0) at baseline.    */
+      q = "<g transform=\"matrix(1 0 0 -1 ";
+      while( *q != '\0' ) *p++ = *q++;
+      p += svg_ftoa3(x_pt, p);
+      *p++ = ' ';
+      p += svg_ftoa3(y_pt, p);
+      q = ")\">";
+      while( *q != '\0' ) *p++ = *q++;
+      fwrite(hdr, 1, (size_t) (p - hdr), out_fp);
+      svg_emit_word_paths(psn, string(x),
+        size_pt, colour_str, svg_text_features);
+      fputs("</g>\n", out_fp);
+      return;
+    }
+  }
 
   /* Inline the counter-flip transform on the <text> element itself instead */
   /* of wrapping in a <g>.  This is the coord-folded form of the historic   */
