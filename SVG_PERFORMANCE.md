@@ -26,6 +26,7 @@ Stable, warm-cache, single-pass timings on the user-guide build
 | + #2 `setvbuf(out_fp, 128 KiB)` + flush         | 36.5 s  | 30.8 s  | 0.41 s | real -2.9%    |
 | + #3 memoize parsed @Graphic token streams      | 35.6 s  | 30.2 s  | 0.34 s | real -5.3%    |
 | + #4 hash `svg_ps_exec_op` dispatch (`2a33e3d`) | ~32 s   | ~22 s   | -      | real -15% (and ~-58% vs the pre-perf-work ~77 s wall) |
+| + #5 hash `svg_glyph_to_unicode`; per-font face-flag cache; consolidate SVG_PrintWord stdio (perf round 3) | ~26-29 s | ~20 s | 0.4-0.9 s | real -15% vs #4, user -10% vs #4 |
 
 Cumulative wall-time delta over the dict-hash baseline: **real -5.3%**,
 **user -5.3%**, **sys -19%**.  Below the 25-40% goal -- once
@@ -61,6 +62,36 @@ high but the speedup is consistent across runs.  This closes the
 quick-win list opened by SVG_PERFORMANCE.md's section 4 ranking
 (items #1, #3, #4, #5, #6 all landed).  Next opportunities tracked
 in NEXT_OPTIMIZATIONS.md.
+
+### 1.3 Perf round 3 (landed 2026-05-23)
+
+Three changes layered on top of `2a33e3d`:
+
+1. **`svg_glyph_to_unicode` hash table** -- the linear strcmp scan over
+   the ~380-entry `svg_glyph_table` was called once per character in
+   `svg_emit_word_text` (~250k chars on the User's Guide).  Replaced
+   with the same FNV-1a + open-addressed-linear-probing pattern as
+   `svg_dict_lookup` and `svg_op_lookup`, lazily built on first call.
+   Lookup drops from O(N) to ~1.2 probes/avg.  Single biggest win in
+   this round.
+2. **Per-font face-flag cache** -- `SVG_PrintWord` is called once per
+   word (~99k times on the User's Guide), and each call previously ran
+   four `strstr` probes against the FontFace string to compute
+   is_bold/is_italic.  Cache by FONT_NUM in a 64-entry open-addressed
+   table; pre-render the family attribute fragment so the per-word
+   cost drops to a single `fprintf` for the open `<g><text>` tag.
+3. **`SVG_PrintWord` stdio consolidation** -- combined the previous
+   five separate `fprintf`/`fputs`/`fputc` calls (one each for the
+   `<g>`, the `<text>` open, the optional weight/style attributes,
+   and the fill colour) into a single `fprintf` with conditional
+   format specifiers.  Reduces the stdio dispatch overhead per word
+   without changing the output bytes (attribute order preserved).
+
+User's Guide single-pass wall-time falls from ~32 s to **~26-29 s**
+(real) / **~20 s** (user) on this WSL2 box; under the 30 s wall
+target.  Output is byte-identical to baseline except for the embedded
+`@CurrentTimeAndDate` timestamp.  Snippet regression suite holds at
+65 Pass-Excellent / 0 Fail.
 
 
 SVG is **~1.7x slower wall, ~1.4x slower user** on `-r3`. The 3x figure on

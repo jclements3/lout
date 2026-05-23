@@ -98,6 +98,16 @@ static void svg_psinterp_init(void);
 static void svg_psinterp_shutdown(void);
 static void svg_emit_pattern_defs(void);
 
+/* Forward decl: FNV-1a hash used by the dict lookup, op-id dispatch, and    */
+/* (since perf round 3) the glyph-name->unicode lookup.  Defined alongside  */
+/* the dict helpers further down.                                            */
+static unsigned int svg_name_hash(const char *s);
+
+/* Forward decl: the per-document font-face flag cache (defined alongside    */
+/* SVG_PrintWord); SVG_PrintInitialize resets the cache between back-to-     */
+/* back document builds inside the same process.                             */
+static void svg_face_cache_clear(void);
+
 /* Glyph-outline service implemented in z53_glyph.c.  Returns 1 if the      */
 /* font + glyph are known (and the callbacks have been called to lay down   */
 /* the outline), 0 to fall back to the caller's bbox approximation.  The    */
@@ -144,6 +154,7 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
   /* Persistent PS-interpreter dictionary stack lives across the entire     */
   /* document, mirroring PostScript's own state.                            */
   svg_psinterp_init();
+  svg_face_cache_clear();
   if( out_fp != NULL )
   {
     /* Larger fully-buffered I/O.  Safe to call before any writes; the      */
@@ -707,19 +718,67 @@ static const struct svg_glyph_map svg_glyph_table[] = {
 };
 
 
-static unsigned int svg_glyph_to_unicode(const char *name)
+/* Glyph-name -> Unicode lookup: open-addressed hash over svg_glyph_table.   */
+/* The plain linear scan that lived here previously cost one strcmp per     */
+/* (entry, character) pair, with ~380 entries the table is short but the    */
+/* User's Guide goes through hundreds of thousands of characters -- the    */
+/* scan dominated svg_emit_word_text once the dict and op-dispatch hashes   */
+/* landed.  Lazily-built power-of-two open-addressing table (FNV-1a) keyed  */
+/* on the entry name; lookup hits in 1-2 probes on average.                 */
+#define SVG_GLYPH_HASH_SIZE 1024
+#define SVG_GLYPH_HASH_MASK (SVG_GLYPH_HASH_SIZE - 1)
+struct svg_glyph_hash_entry {
+  const char    *name;
+  unsigned int   hash;
+  unsigned int   cp;
+};
+static struct svg_glyph_hash_entry svg_glyph_hash[SVG_GLYPH_HASH_SIZE];
+static int svg_glyph_hash_built = 0;
+
+static void svg_glyph_hash_build(void)
 {
   int i;
-  if( name == NULL || name[0] == '\0' )
-    return 0;
-  if( strcmp(name, "-none-") == 0 )
-    return 0;
+  unsigned int h, slot;
+  for( i = 0; i < SVG_GLYPH_HASH_SIZE; i++ )
+  {
+    svg_glyph_hash[i].name = NULL;
+    svg_glyph_hash[i].hash = 0;
+    svg_glyph_hash[i].cp   = 0;
+  }
   for( i = 0; svg_glyph_table[i].name != NULL; i++ )
   {
-    if( strcmp(svg_glyph_table[i].name, name) == 0 )
-      return svg_glyph_table[i].cp;
+    h = svg_name_hash(svg_glyph_table[i].name);
+    slot = h & (unsigned int) SVG_GLYPH_HASH_MASK;
+    while( svg_glyph_hash[slot].name != NULL )
+      slot = (slot + 1) & (unsigned int) SVG_GLYPH_HASH_MASK;
+    svg_glyph_hash[slot].name = svg_glyph_table[i].name;
+    svg_glyph_hash[slot].hash = h;
+    svg_glyph_hash[slot].cp   = svg_glyph_table[i].cp;
   }
-  return 0;
+  svg_glyph_hash_built = 1;
+}
+
+static unsigned int svg_glyph_to_unicode(const char *name)
+{
+  unsigned int h, slot;
+  const struct svg_glyph_hash_entry *e;
+  if( name == NULL || name[0] == '\0' )
+    return 0;
+  if( name[0] == '-' && strcmp(name, "-none-") == 0 )
+    return 0;
+  if( !svg_glyph_hash_built )
+    svg_glyph_hash_build();
+  h = svg_name_hash(name);
+  slot = h & (unsigned int) SVG_GLYPH_HASH_MASK;
+  for( ;; )
+  {
+    e = &svg_glyph_hash[slot];
+    if( e->name == NULL )
+      return 0;
+    if( e->hash == h && strcmp(e->name, name) == 0 )
+      return e->cp;
+    slot = (slot + 1) & (unsigned int) SVG_GLYPH_HASH_MASK;
+  }
 }
 
 
@@ -983,15 +1042,99 @@ static void SVG_PrintAfterLastPage(void)
 /*                                                                           */
 /*****************************************************************************/
 
+/* Per-font face-flag cache.  FontFace() returns a stable pointer keyed on   */
+/* fnum, and FontFamily()'s string never changes either, but SVG_PrintWord  */
+/* fires for every word in the document (~99k times on the User's Guide) -- */
+/* each call previously ran 4 strstr() probes against the face string to    */
+/* decide font-weight/font-style.  Hash by fnum % SVG_FACE_CACHE_SIZE with  */
+/* linear probing on collision; on hit we replay the cached flags and the   */
+/* pre-formatted "<g transform...><text ..." opening so the per-word cost   */
+/* drops to a single fputs of an already-prepared header plus the variable   */
+/* x/y/colour/size pieces.                                                   */
+#define SVG_FACE_CACHE_SIZE 64
+#define SVG_FACE_CACHE_MASK (SVG_FACE_CACHE_SIZE - 1)
+struct svg_face_cache_entry {
+  FONT_NUM    fnum;          /* 0 means unused                              */
+  BOOLEAN     is_bold;
+  BOOLEAN     is_italic;
+  const char *family;        /* cached FontFamily() pointer                  */
+  /* pre-formatted attribute fragment for the <text> open tag covering the  */
+  /* font-family / weight / style attributes (everything that depends only  */
+  /* on fnum, i.e. not on x/y/size/colour).  Pre-rendered as a single chunk */
+  /* so SVG_PrintWord can fwrite it whole instead of issuing 3-5 stdio      */
+  /* calls per word.                                                         */
+  char        attr_chunk[160];
+  int         attr_len;
+};
+static struct svg_face_cache_entry svg_face_cache[SVG_FACE_CACHE_SIZE];
+
+static struct svg_face_cache_entry *svg_face_cache_get(FONT_NUM fnum)
+{
+  unsigned int slot, probes;
+  struct svg_face_cache_entry *e;
+  FULL_CHAR *fname, *fface;
+  int n;
+
+  slot = (unsigned int) fnum & (unsigned int) SVG_FACE_CACHE_MASK;
+  for( probes = 0; probes < SVG_FACE_CACHE_SIZE; probes++ )
+  {
+    e = &svg_face_cache[slot];
+    if( e->fnum == fnum )
+      return e;
+    if( e->fnum == 0 )
+    {
+      /* fill the slot */
+      e->fnum    = fnum;
+      fname      = FontFamily(fnum);
+      fface      = FontFace(fnum);
+      e->family  = fname == NULL ? "serif" : (const char *) fname;
+      e->is_bold = FALSE;
+      e->is_italic = FALSE;
+      if( fface != NULL )
+      {
+        if( strstr((const char *) fface, "Bold") != NULL )
+          e->is_bold = TRUE;
+        if( strstr((const char *) fface, "Italic") != NULL ||
+            strstr((const char *) fface, "Slope")  != NULL ||
+            strstr((const char *) fface, "Oblique") != NULL )
+          e->is_italic = TRUE;
+      }
+      /* Pre-render only the family attribute; weight/style are appended    */
+      /* after font-size in the emit step to keep the SVG attribute order    */
+      /* byte-for-byte identical to the pre-cache emit.                      */
+      n = sprintf(e->attr_chunk, " font-family=\"%s\"", e->family);
+      e->attr_len = n;
+      return e;
+    }
+    slot = (slot + 1) & (unsigned int) SVG_FACE_CACHE_MASK;
+  }
+  /* table full -- shouldn't happen in practice (~50 fonts max in User's    */
+  /* Guide); fall through with a stack-local non-cached entry the caller     */
+  /* will read but won't be re-found on next probe.                          */
+  return NULL;
+}
+
+static void svg_face_cache_clear(void)
+{
+  int i;
+  for( i = 0; i < SVG_FACE_CACHE_SIZE; i++ )
+  {
+    svg_face_cache[i].fnum     = 0;
+    svg_face_cache[i].attr_len = 0;
+  }
+}
+
 static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
 {
   FONT_NUM fnum;
   FULL_LENGTH fsize, fhxh;
-  FULL_CHAR *fname, *fface;
   double x_pt, y_pt, size_pt;
   char colourbuf[32];
   const char *colour_str;
+  struct svg_face_cache_entry *fc;
   BOOLEAN is_bold, is_italic;
+  const char *family_attr;       /* always begins with " font-family=..."   */
+  char family_attr_local[200];
 
   if( out_fp == NULL || !page_open )
     return;
@@ -999,8 +1142,29 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
   fnum   = word_font(x);
   fsize  = FontSize(fnum, x);
   fhxh   = FontHalfXHeight(fnum);
-  fname  = FontFamily(fnum);
-  fface  = FontFace(fnum);
+
+  fc = svg_face_cache_get(fnum);
+  if( fc != NULL )
+  {
+    family_attr = fc->attr_chunk;
+    is_bold     = fc->is_bold;
+    is_italic   = fc->is_italic;
+  }
+  else
+  {
+    /* Cache full -- rebuild attrs on the stack.  Extremely rare in practice */
+    /* (SVG_FACE_CACHE_SIZE is 64; the User's Guide uses ~50 fonts at most). */
+    FULL_CHAR *fname = FontFamily(fnum);
+    FULL_CHAR *fface = FontFace(fnum);
+    const char *fam  = fname == NULL ? "serif" : (const char *) fname;
+    is_bold   = (fface != NULL && strstr((const char *) fface, "Bold") != NULL);
+    is_italic = (fface != NULL &&
+                 (strstr((const char *) fface, "Italic")  != NULL ||
+                  strstr((const char *) fface, "Slope")   != NULL ||
+                  strstr((const char *) fface, "Oblique") != NULL));
+    sprintf(family_attr_local, " font-family=\"%s\"", fam);
+    family_attr = family_attr_local;
+  }
 
   /* Lout vpos marks the x-height midline; shift down by half-xheight to    */
   /* reach the baseline.  Coordinates are in the Lout (bottom-left) frame   */
@@ -1011,36 +1175,21 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
 
   colour_str = svg_colour_rgb(word_colour(x), colourbuf);
 
-  is_bold = FALSE;
-  is_italic = FALSE;
-  if( fface != NULL )
-  {
-    if( strstr((const char *) fface, "Bold") != NULL )
-      is_bold = TRUE;
-    if( strstr((const char *) fface, "Italic") != NULL ||
-        strstr((const char *) fface, "Slope") != NULL ||
-        strstr((const char *) fface, "Oblique") != NULL )
-      is_italic = TRUE;
-  }
-
   /* Counter-flip wrapper so the glyph is upright inside the page-level Y-  */
   /* flip group.  The text origin lives at (x_pt, y_pt) in flipped coords; */
   /* after scale(1,-1) the local frame is back to top-left, so x="0" y="0" */
-  /* anchors the baseline.                                                  */
+  /* anchors the baseline.  Attribute order matches the pre-cache emit       */
+  /* exactly so the SVG is byte-for-byte identical to baseline.              */
   fprintf(out_fp,
-    "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">",
-    x_pt, y_pt);
-  fprintf(out_fp,
-    "<text x=\"0\" y=\"0\" font-family=\"%s\" font-size=\"%.3f\"",
-    fname == NULL ? "serif" : (const char *) fname,
-    size_pt);
-  if( is_bold )
-    fputs(" font-weight=\"bold\"", out_fp);
-  if( is_italic )
-    fputs(" font-style=\"italic\"", out_fp);
-  if( colour_str != NULL )
-    fprintf(out_fp, " fill=\"%s\"", colour_str);
-  fputc('>', out_fp);
+    "<g transform=\"translate(%.3f,%.3f) scale(1,-1)\">"
+    "<text x=\"0\" y=\"0\"%s font-size=\"%.3f\"%s%s%s%s%s>",
+    x_pt, y_pt,
+    family_attr, size_pt,
+    is_bold   ? " font-weight=\"bold\""  : "",
+    is_italic ? " font-style=\"italic\"" : "",
+    colour_str != NULL ? " fill=\""     : "",
+    colour_str != NULL ? colour_str     : "",
+    colour_str != NULL ? "\""            : "");
   svg_emit_word_text(fnum, string(x), x, size_pt);
   fputs("</text></g>\n", out_fp);
 }
