@@ -118,10 +118,27 @@ callothersubr / pop / dotsection / hstem / vstem` and the `flex`
 family).  Plus ~80 LOC of ASCII-to-glyph-name mapping and four
 callback shims in `z53.c`.
 
+Update 2026-05-22: CFF/OpenType outline support landed (extends
+`z53_glyph.c`).  The loader now probes `.pfb` first (Adobe base-35)
+then falls through to `.otf` via a parallel search path
+(`LOUT_OTF_FONT_DIR` env override + `/usr/share/fonts/opentype/`
+and `/usr/share/fonts/truetype/` with one-level subdirectory walk).
+The OpenType table directory parser locates the `CFF ` table,
+decodes the Top DICT (`CharStrings` op 17, `Private` op 18,
+`charset` op 15) and Private DICT (`Subrs` op 19), then runs a
+Type 2 charstring interpreter that mirrors the Type 1 one but with
+proper variadic operators (rlineto / hlineto / vlineto / rrcurveto /
+vhcurveto / hvcurveto / hhcurveto / vvcurveto / rcurveline /
+rlinecurve), biased subroutine calls (callsubr / callgsubr with
+107 / 1131 / 32768 bias), the flex family (hflex / flex / hflex1 /
+flex1 expanded to two rrcurveto's), and the implicit width-delta
+operand handling.  TrueType `.ttf` (`glyf` table) is still out of
+scope and falls through to the bbox rectangle.
+
 Out-of-scope follow-ups (left for a future round):
-  - CFF / OTF outline support for fonts that ship only as `.otf`
-    (would let users pick fonts outside the base-35 set).  Right
-    now arbitrary user-defined fonts fall back to the bbox.
+  - TrueType `glyf` outline parsing for `.ttf` fonts (DejaVu,
+    Liberation, Noto).  Many system fonts ship as TTF rather than
+    CFF-based OTF; today they fall back to the bbox.  Phase 2.
   - Honouring the active LCM for non-Latin1 character encodings
     inside `charpath` (the operand is whatever bytes the PS source
     pushed, with no FONT_NUM in scope; we use Adobe

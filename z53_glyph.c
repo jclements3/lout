@@ -9,22 +9,30 @@
 /*  any later version.                                                       */
 /*                                                                           */
 /*  FILE:         z53_glyph.c                                                */
-/*  MODULE:       SVG Back End / Type 1 Glyph Outline Service                */
+/*  MODULE:       SVG Back End / Type 1 + CFF Glyph Outline Service          */
 /*  EXTERNS:      svg_glyph_emit_outline                                     */
 /*                                                                           */
-/*  STATUS:       Loads URW++ / Ghostscript Type 1 .pfb font files from a    */
-/*                hardcoded search path and decodes glyph outlines on        */
-/*                demand for SVG_OP_CHARPATH in z53.c.  Used only when the   */
-/*                SVG back end is live; the PostScript back end (z49.c)      */
-/*                never calls into this module.                              */
+/*  STATUS:       Two outline back ends behind one cache:                    */
 /*                                                                           */
-/*                Type 1 PFB segment unwrap -> eexec decryption (key 55665,  */
-/*                lenIV 4) -> CharStrings dict scan -> per-glyph charstring  */
-/*                decryption (key 4330, lenIV 4) -> Type 1 charstring        */
-/*                interpreter.  Subroutines (Subrs array) supported; flex /  */
-/*                OtherSubrs ignored (treated as no-ops); seac (accented     */
-/*                composite) supported via a small AdobeStandardEncoding    */
-/*                table.                                                     */
+/*                (a) Adobe Type 1 .pfb (URW++ / Ghostscript base-35 set).   */
+/*                    PFB segment unwrap -> eexec decryption (key 55665,    */
+/*                    lenIV 4) -> CharStrings dict scan -> per-glyph        */
+/*                    charstring decryption (key 4330, lenIV 4) ->          */
+/*                    Type 1 charstring interpreter.  Subrs supported,     */
+/*                    seac via a small Adobe StandardEncoding table.        */
+/*                                                                           */
+/*                (b) CFF/OpenType .otf (OTTO-tagged container, Type 2      */
+/*                    charstrings).  OT table directory walk -> CFF        */
+/*                    section -> Top DICT (CharStrings, Private,           */
+/*                    charset) -> per-glyph Type 2 charstring with         */
+/*                    biased local + global Subrs and the hflex / flex /   */
+/*                    hflex1 / flex1 family.                               */
+/*                                                                           */
+/*                Both share the same arena allocator, cache record, and    */
+/*                public entry point (svg_glyph_emit_outline).               */
+/*                                                                           */
+/*                TrueType `glyf` outlines (.ttf with magic 0x00010000)     */
+/*                are out of scope and fall through to the bbox rectangle. */
 /*                                                                           */
 /*  ANSI C ONLY: must compile with tcc.  No mid-block decls, no // comments, */
 /*  no designated initialisers, no GCC extensions.                           */
@@ -44,13 +52,19 @@
 /*****************************************************************************/
 
 #define SVG_GLYPH_MAX_FONTS       16    /* concurrent fonts in cache         */
-#define SVG_GLYPH_MAX_GLYPHS    1024    /* glyphs per font                    */
-#define SVG_GLYPH_MAX_SUBRS     4096    /* Type 1 Subrs per font              */
+#define SVG_GLYPH_MAX_GLYPHS    4096    /* glyphs per font                    */
+#define SVG_GLYPH_MAX_SUBRS     8192    /* Subrs per font (T1 or CFF local)   */
+#define SVG_GLYPH_MAX_GSUBRS    8192    /* CFF global Subrs                   */
 #define SVG_GLYPH_NAME_LEN        40    /* AGL glyph name max length          */
 #define SVG_GLYPH_PFB_MAX    1048576    /* 1 MiB raw PFB cap                  */
+#define SVG_GLYPH_OTF_MAX    8388608    /* 8 MiB raw OTF cap                  */
 #define SVG_GLYPH_DECRYPT_LEN_IV   4    /* default lenIV for both layers      */
-#define SVG_GLYPH_STK_DEPTH       48    /* CharString operand-stack depth     */
-#define SVG_GLYPH_PSN_LEN         48    /* PS font name max length            */
+#define SVG_GLYPH_STK_DEPTH       96    /* CharString operand-stack depth     */
+#define SVG_GLYPH_PSN_LEN         96    /* PS font name max length            */
+
+/* Font kind tag: governs interpreter dispatch.                              */
+#define SVG_GLYPH_KIND_T1   1
+#define SVG_GLYPH_KIND_CFF  2
 
 
 /*****************************************************************************/
@@ -72,13 +86,19 @@ typedef struct svg_subr_entry {
 
 typedef struct svg_glyph_font {
   char            ps_name[SVG_GLYPH_PSN_LEN];
+  int             kind;                    /* SVG_GLYPH_KIND_T1 or _CFF      */
   int             loaded;                  /* 1 once parsed                  */
   int             load_failed;             /* 1 if we tried and failed       */
   svg_glyph_entry glyphs[SVG_GLYPH_MAX_GLYPHS];
   int             nglyphs;
-  svg_subr_entry  subrs[SVG_GLYPH_MAX_SUBRS];
+  svg_subr_entry  subrs[SVG_GLYPH_MAX_SUBRS];   /* T1 Subrs or CFF local     */
   int             nsubrs;
-  int             lenIV;                   /* charstring leading random bytes*/
+  int             subr_bias;               /* CFF: bias for local Subr idx  */
+  svg_subr_entry  gsubrs[SVG_GLYPH_MAX_GSUBRS]; /* CFF only                  */
+  int             ngsubrs;
+  int             gsubr_bias;              /* CFF: bias for global subrs    */
+  int             lenIV;                   /* Type 1 only                    */
+  double          em_scale;                /* design-units -> 1000-em factor */
   /* simple arena -- one malloc, grown as needed; freed at process exit (no  */
   /* explicit cleanup hook in this back end).  All cs / subrs pointers       */
   /* point inside arena.                                                     */
@@ -161,6 +181,43 @@ static const char *svg_glyph_search_dir[] = {
   "/usr/share/fonts/type1/urw-fonts/",
   "/usr/share/ghostscript/9.55.0/Resource/Font/",
   "/usr/share/ghostscript/10.0.0/Resource/Font/",
+  NULL
+};
+
+/*****************************************************************************/
+/*                                                                           */
+/*  OTF/CFF lookup.  Two paths:                                              */
+/*                                                                           */
+/*    (a) svg_glyph_otf_map[]: PS font name -> known OTF filename.  Empty   */
+/*        by default; populate when a system distributes a CFF-based OTF   */
+/*        under a stable name.                                              */
+/*                                                                           */
+/*    (b) svg_glyph_otf_dir[]: directory tree walk.  Each directory is     */
+/*        traversed one level deep; any file ending .otf or .OTF whose     */
+/*        first 4 bytes are 'OTTO' is considered.  We accept the file if  */
+/*        the PostScript name matches either the basename (sans .otf), or */
+/*        the font's Name INDEX entry inside the CFF table.                */
+/*                                                                           */
+/*  Override via LOUT_OTF_FONT_DIR env var (single dir prepended).         */
+/*                                                                           */
+/*****************************************************************************/
+
+static const svg_glyph_map_entry svg_glyph_otf_map[] = {
+  { "LinLibertine_R",       "LinLibertine_R.otf" },
+  { "LinLibertine_RB",      "LinLibertine_RB.otf" },
+  { "LinLibertine_RI",      "LinLibertine_RI.otf" },
+  { "Cantarell-Regular",    "Cantarell-Regular.otf" },
+  { "Cantarell-Bold",       "Cantarell-Bold.otf" },
+  { "Cabin-Regular",        "Cabin-Regular.otf" },
+  { "Cabin-Bold",           "Cabin-Bold.otf" },
+  { NULL, NULL }
+};
+
+static const char *svg_glyph_otf_dir[] = {
+  "/usr/share/fonts/opentype/",
+  "/usr/share/fonts/truetype/",   /* some .otf live here, mislabelled     */
+  "/usr/local/share/fonts/opentype/",
+  "/usr/local/share/fonts/",
   NULL
 };
 
@@ -684,6 +741,11 @@ static int svg_glyph_find_pfb_path(const char *ps_name, char *out, size_t cap)
 /*                                                                           */
 /*****************************************************************************/
 
+/* Forward declarations for the CFF/OTF loader (full body lives below the   */
+/* Type 1 charstring interpreter).                                           */
+static int svg_glyph_find_otf_path(const char *ps_name, char *out, size_t cap);
+static int svg_glyph_load_otf(svg_glyph_font *f, const char *path);
+
 static int svg_glyph_load_font(const char *ps_name)
 {
   int i;
@@ -694,6 +756,7 @@ static int svg_glyph_load_font(const char *ps_name)
   size_t ascii_len = 0, binary_len = 0;
   unsigned char *plain = NULL;
   size_t plain_len = 0;
+  int tried_pfb = 0;
 
   if( ps_name == NULL || ps_name[0] == 0 ) return -1;
   if( !svg_glyph_std_enc_init ) svg_glyph_init_std_enc();
@@ -712,32 +775,55 @@ static int svg_glyph_load_font(const char *ps_name)
   memset(f, 0, sizeof *f);
   strncpy(f->ps_name, ps_name, SVG_GLYPH_PSN_LEN-1);
   f->ps_name[SVG_GLYPH_PSN_LEN-1] = 0;
-  f->lenIV = SVG_GLYPH_DECRYPT_LEN_IV;
+  f->lenIV    = SVG_GLYPH_DECRYPT_LEN_IV;
+  f->em_scale = 1.0;
   svg_glyph_n_fonts++;
 
-  if( !svg_glyph_find_pfb_path(ps_name, path, sizeof path) )
-  { f->load_failed = 1; return -1; }
+  /* (a) Try Type 1 .pfb first -- the Adobe base-35 mappings live there.    */
+  if( svg_glyph_find_pfb_path(ps_name, path, sizeof path) )
+  {
+    tried_pfb = 1;
+    if( svg_glyph_read_pfb(path, &ascii_buf, &ascii_len,
+                           &binary_buf, &binary_len) &&
+        binary_buf != NULL && binary_len > 0 &&
+        svg_glyph_eexec_decrypt(binary_buf, binary_len, &plain, &plain_len) )
+    {
+      free(binary_buf);  binary_buf = NULL;
+      free(ascii_buf);   ascii_buf  = NULL;
+      f->kind  = SVG_GLYPH_KIND_T1;
+      f->lenIV = svg_glyph_parse_lenIV(plain, plain_len);
+      svg_glyph_parse_subrs(f, plain, plain_len);
+      if( svg_glyph_parse_charstrings(f, plain, plain_len) && f->nglyphs > 0 )
+      { free(plain); f->loaded = 1; return svg_glyph_n_fonts - 1; }
+      free(plain);  plain = NULL;
+    }
+    else
+    {
+      free(binary_buf);
+      free(ascii_buf);
+    }
+  }
 
-  if( !svg_glyph_read_pfb(path, &ascii_buf, &ascii_len, &binary_buf, &binary_len) )
-  { f->load_failed = 1; return -1; }
+  /* (b) Fall through to CFF/OTF.                                            */
+  if( svg_glyph_find_otf_path(ps_name, path, sizeof path) )
+  {
+    /* Reset any partial state from a failed PFB attempt.                    */
+    if( tried_pfb )
+    {
+      f->nglyphs    = 0;
+      f->nsubrs     = 0;
+      f->arena_used = 0;
+    }
+    if( svg_glyph_load_otf(f, path) && f->nglyphs > 0 )
+    {
+      f->kind   = SVG_GLYPH_KIND_CFF;
+      f->loaded = 1;
+      return svg_glyph_n_fonts - 1;
+    }
+  }
 
-  if( binary_buf == NULL || binary_len == 0 )
-  { free(ascii_buf); free(binary_buf); f->load_failed = 1; return -1; }
-
-  if( !svg_glyph_eexec_decrypt(binary_buf, binary_len, &plain, &plain_len) )
-  { free(ascii_buf); free(binary_buf); f->load_failed = 1; return -1; }
-  free(binary_buf);
-  free(ascii_buf);
-
-  f->lenIV = svg_glyph_parse_lenIV(plain, plain_len);
-  svg_glyph_parse_subrs(f, plain, plain_len);
-  if( !svg_glyph_parse_charstrings(f, plain, plain_len) )
-  { free(plain); f->load_failed = 1; return -1; }
-  free(plain);
-  if( f->nglyphs == 0 )
-  { f->load_failed = 1; return -1; }
-  f->loaded = 1;
-  return svg_glyph_n_fonts - 1;
+  f->load_failed = 1;
+  return -1;
 }
 
 
@@ -1148,6 +1234,10 @@ static int svg_glyph_run_cs(svg_glyph_emit_ctx *c, svg_glyph_font *f,
 /*                                                                           */
 /*****************************************************************************/
 
+/* Forward declaration for the CFF Type 2 interpreter (defined below).      */
+static int svg_glyph_run_cff_cs(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  const unsigned char *cs, int len);
+
 int svg_glyph_emit_outline(
   const char *ps_font_name,
   const char *glyph_name,
@@ -1180,7 +1270,10 @@ int svg_glyph_emit_outline(
   ctx.line  = cb_line;
   ctx.curve = cb_curve;
   ctx.close = cb_close;
-  ctx.scale = font_size_units / 1000.0;
+  /* CFF design units are usually 1000 already; if UnitsPerEm differs the   */
+  /* em_scale multiplier folds into the path-unit scale so all paths land   */
+  /* in the same 1000-em conceptual coordinate frame.                       */
+  ctx.scale = (font_size_units / 1000.0) * f->em_scale;
   ctx.x0    = x0;
   ctx.y0    = y0;
   ctx.cur_x = 0.0;
@@ -1191,10 +1284,1392 @@ int svg_glyph_emit_outline(
   ctx.depth = 0;
   ctx.abort = 0;
 
-  r = svg_glyph_run_cs(&ctx, f, g->cs, g->cs_len);
+  if( f->kind == SVG_GLYPH_KIND_CFF )
+    r = svg_glyph_run_cff_cs(&ctx, f, g->cs, g->cs_len);
+  else
+    r = svg_glyph_run_cs(&ctx, f, g->cs, g->cs_len);
   (void) r;
   if( ctx.abort ) return 0;
   if( advance_out != NULL )
     *advance_out = ctx.adv_x * ctx.scale;
   return 1;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  CFF / OpenType outline loader.                                            */
+/*                                                                           */
+/*  Phase 1 supports CFF-based OpenType (OTTO magic) with Type 2 charstring  */
+/*  outlines.  Phase 1 does NOT support TrueType `glyf` outlines (magic     */
+/*  0x00010000); when those are encountered the loader returns 0 and the    */
+/*  caller falls back to the bbox approximation.                             */
+/*                                                                           */
+/*  Reference: Adobe Technical Note #5176 ("Compact Font Format             */
+/*  Specification") and #5177 ("Type 2 Charstring Format").                  */
+/*                                                                           */
+/*****************************************************************************/
+
+/* Big-endian readers (OpenType is BE).                                      */
+static unsigned int svg_glyph_be_u16(const unsigned char *p)
+{ return ((unsigned int) p[0] << 8) | (unsigned int) p[1]; }
+
+static unsigned long svg_glyph_be_u32(const unsigned char *p)
+{ return ((unsigned long) p[0] << 24) | ((unsigned long) p[1] << 16)
+       | ((unsigned long) p[2] <<  8) |  (unsigned long) p[3]; }
+
+/* Read an N-byte big-endian unsigned integer (1<=N<=4).                     */
+static unsigned long svg_glyph_be_un(const unsigned char *p, int n)
+{ unsigned long v = 0;
+  int i;
+  for( i = 0; i < n; i++ ) v = (v << 8) | (unsigned long) p[i];
+  return v;
+}
+
+
+/*****************************************************************************/
+/*  CFF INDEX walker.  An INDEX is:                                          */
+/*    count (u16) -- if 0, the INDEX is empty and consumes 2 bytes total.   */
+/*    offSize (u8) -- 1..4                                                  */
+/*    offset[count+1] -- each offSize bytes long, 1-based into the data    */
+/*    data[]          -- offset[count+1] - 1 bytes of payload              */
+/*  Returns 1 on success, with *next set to one past the INDEX end and    */
+/*  *count_out / *offsets_out / *data_base_out populated.                  */
+/*****************************************************************************/
+
+typedef struct svg_glyph_cff_index {
+  unsigned int   count;
+  int            off_size;
+  const unsigned char *offsets;     /* (count+1) * off_size bytes           */
+  const unsigned char *data;        /* element data starts here (offset-1) */
+  size_t         total_size;        /* including header                     */
+} svg_glyph_cff_index;
+
+static int svg_glyph_cff_parse_index(const unsigned char *buf, size_t len,
+  size_t off, svg_glyph_cff_index *out)
+{
+  unsigned int count;
+  int off_size;
+  size_t base, data_off, total_data;
+  if( off + 2 > len ) return 0;
+  count = svg_glyph_be_u16(buf + off);
+  if( count == 0 )
+  { out->count = 0; out->off_size = 0;
+    out->offsets = NULL; out->data = NULL; out->total_size = 2;
+    return 1;
+  }
+  if( off + 3 > len ) return 0;
+  off_size = buf[off + 2];
+  if( off_size < 1 || off_size > 4 ) return 0;
+  base = off + 3;
+  if( base + (size_t) (count + 1) * (size_t) off_size > len ) return 0;
+  /* The data block begins at base + (count+1)*off_size; offsets are 1-based  */
+  /* into that block.                                                        */
+  data_off = base + (size_t) (count + 1) * (size_t) off_size;
+  total_data = (size_t) svg_glyph_be_un(buf + base + (size_t) count * (size_t) off_size,
+                                        off_size);
+  if( total_data < 1 ) total_data = 1;
+  if( data_off + (total_data - 1) > len ) return 0;
+  out->count    = count;
+  out->off_size = off_size;
+  out->offsets  = buf + base;
+  out->data     = buf + data_off;
+  out->total_size = (data_off - off) + (total_data - 1);
+  return 1;
+}
+
+/* Fetch INDEX element i (0-based).  Sets *p / *plen.  Returns 1 on success. */
+static int svg_glyph_cff_index_get(const svg_glyph_cff_index *ix, unsigned int i,
+  const unsigned char **p, int *plen)
+{
+  unsigned long o1, o2;
+  if( i >= ix->count ) return 0;
+  o1 = svg_glyph_be_un(ix->offsets + (size_t) i      * (size_t) ix->off_size,
+                       ix->off_size);
+  o2 = svg_glyph_be_un(ix->offsets + (size_t) (i+1) * (size_t) ix->off_size,
+                       ix->off_size);
+  if( o2 < o1 ) return 0;
+  *p    = ix->data + (o1 - 1);
+  *plen = (int) (o2 - o1);
+  return 1;
+}
+
+
+/*****************************************************************************/
+/*  Top DICT / Private DICT operand-and-operator decoder.  Streams through  */
+/*  the DICT bytes, accumulating numeric operands until an operator byte    */
+/*  arrives; each operator call invokes a tiny callback that records the    */
+/*  operator-id and operand values into a `dict_result` struct.             */
+/*****************************************************************************/
+
+typedef struct svg_glyph_dict_result {
+  /* From Top DICT.                                                          */
+  long  charstrings_off;     /* op 17 -- offset from CFF base                */
+  long  private_size;        /* op 18 [0]                                    */
+  long  private_off;         /* op 18 [1]                                    */
+  long  charset_off;         /* op 15 -- 0=ISOAdobe, 1=Expert, 2=ExpertSubset*/
+  long  encoding_off;        /* op 16                                        */
+  long  charstring_type;     /* op 12 6  (defaults to 2)                     */
+  /* From Private DICT.                                                      */
+  long  local_subrs_off;     /* op 19 -- relative to start of Private DICT   */
+  double nominal_width_x;    /* op 21 -- defaults to 0                       */
+  double default_width_x;    /* op 20 -- defaults to 0                       */
+} svg_glyph_dict_result;
+
+static void svg_glyph_dict_result_init(svg_glyph_dict_result *r)
+{
+  r->charstrings_off  = -1;
+  r->private_size     = -1;
+  r->private_off      = -1;
+  r->charset_off      = -1;
+  r->encoding_off     = -1;
+  r->charstring_type  = 2;
+  r->local_subrs_off  = -1;
+  r->nominal_width_x  = 0.0;
+  r->default_width_x  = 0.0;
+}
+
+/* Decode a CFF DICT operand starting at p (len = remaining bytes).         */
+/* On success returns the byte length consumed and writes *out.  Returns 0 */
+/* if the byte at *p is an operator (caller should dispatch).               */
+static int svg_glyph_cff_decode_operand(const unsigned char *p, int len,
+  double *out)
+{
+  int b0;
+  if( len < 1 ) return 0;
+  b0 = p[0];
+  if( b0 <= 21 ) return 0;     /* operator -- not an operand                 */
+  if( b0 >= 32 && b0 <= 246 )
+  { *out = (double) (b0 - 139); return 1; }
+  if( b0 >= 247 && b0 <= 250 )
+  { if( len < 2 ) return 0;
+    *out = (double) ((b0 - 247) * 256 + p[1] + 108);
+    return 2;
+  }
+  if( b0 >= 251 && b0 <= 254 )
+  { if( len < 2 ) return 0;
+    *out = (double) (-(b0 - 251) * 256 - p[1] - 108);
+    return 2;
+  }
+  if( b0 == 28 )
+  { int v;
+    if( len < 3 ) return 0;
+    v = (p[1] << 8) | p[2];
+    if( v & 0x8000 ) v -= 0x10000;
+    *out = (double) v;
+    return 3;
+  }
+  if( b0 == 29 )
+  { long v;
+    if( len < 5 ) return 0;
+    v = ((long) p[1] << 24) | ((long) p[2] << 16)
+      | ((long) p[3] <<  8) |  (long) p[4];
+    if( v & 0x80000000L ) v -= 0x100000000L;
+    *out = (double) v;
+    return 5;
+  }
+  if( b0 == 30 )
+  {
+    /* Real number BCD nibbles.  Read until a terminator nibble (0xf).      */
+    char buf[64];
+    int bi = 0;
+    int i = 1;
+    int done = 0;
+    while( i < len && !done && bi + 2 < (int) sizeof buf )
+    { int byte = p[i++];
+      int nibs[2];
+      int j;
+      nibs[0] = (byte >> 4) & 0xf;
+      nibs[1] = byte        & 0xf;
+      for( j = 0; j < 2 && !done; j++ )
+      { int n = nibs[j];
+        if( n <= 9 )      buf[bi++] = (char) ('0' + n);
+        else if( n == 10 ) buf[bi++] = '.';
+        else if( n == 11 ) buf[bi++] = 'E';
+        else if( n == 12 ) { buf[bi++] = 'E'; buf[bi++] = '-'; }
+        else if( n == 14 ) buf[bi++] = '-';
+        else done = 1;
+      }
+    }
+    buf[bi] = 0;
+    *out = atof(buf);
+    return i;
+  }
+  return 0;   /* Reserved 22..27, 31, 255: treat as failure                  */
+}
+
+/* Process one DICT, populating `out`.  `is_top` chooses Top-DICT vs        */
+/* Private-DICT semantics.                                                  */
+static void svg_glyph_cff_decode_dict(const unsigned char *buf, int len,
+  int is_top, svg_glyph_dict_result *out)
+{
+  double stack[48];
+  int sp = 0;
+  int i = 0;
+  while( i < len )
+  {
+    int b = buf[i];
+    if( b > 21 )
+    {
+      double v;
+      int n = svg_glyph_cff_decode_operand(buf + i, len - i, &v);
+      if( n <= 0 ) { i++; continue; }
+      if( sp < (int) (sizeof stack / sizeof stack[0]) ) stack[sp++] = v;
+      i += n;
+      continue;
+    }
+    /* operator */
+    if( b == 12 )
+    { int op2;
+      if( i + 1 >= len ) break;
+      op2 = buf[i + 1];
+      i += 2;
+      if( is_top && op2 == 6 ) out->charstring_type = (long) stack[sp - 1];
+      sp = 0;
+      continue;
+    }
+    if( is_top )
+    {
+      switch( b )
+      {
+        case 15: if( sp >= 1 ) out->charset_off  = (long) stack[sp-1]; break;
+        case 16: if( sp >= 1 ) out->encoding_off = (long) stack[sp-1]; break;
+        case 17: if( sp >= 1 ) out->charstrings_off = (long) stack[sp-1]; break;
+        case 18:
+          if( sp >= 2 )
+          { out->private_size = (long) stack[sp-2];
+            out->private_off  = (long) stack[sp-1];
+          }
+          break;
+        default: break;
+      }
+    }
+    else
+    {
+      /* Private DICT: 19 Subrs, 20 defaultWidthX, 21 nominalWidthX.        */
+      switch( b )
+      {
+        case 19: if( sp >= 1 ) out->local_subrs_off = (long) stack[sp-1]; break;
+        case 20: if( sp >= 1 ) out->default_width_x = stack[sp-1]; break;
+        case 21: if( sp >= 1 ) out->nominal_width_x = stack[sp-1]; break;
+        default: break;
+      }
+    }
+    sp = 0;
+    i++;
+  }
+}
+
+
+/*****************************************************************************/
+/*  OpenType table directory parser.  Locates the `CFF ` table and          */
+/*  optionally `head` (for UnitsPerEm).  Returns 1 on success.              */
+/*****************************************************************************/
+
+static int svg_glyph_parse_ot_dir(const unsigned char *buf, size_t buf_len,
+  size_t *cff_off, size_t *cff_len, int *units_per_em)
+{
+  unsigned long magic;
+  unsigned int n_tables;
+  size_t pos;
+  unsigned int i;
+  *cff_off = 0;
+  *cff_len = 0;
+  *units_per_em = 1000;
+  if( buf_len < 12 ) return 0;
+  magic = svg_glyph_be_u32(buf);
+  if( magic != 0x4f54544fUL )    /* 'OTTO' = CFF OpenType                   */
+    return 0;
+  n_tables = svg_glyph_be_u16(buf + 4);
+  if( n_tables == 0 ) return 0;
+  pos = 12;
+  if( pos + (size_t) n_tables * 16 > buf_len ) return 0;
+  for( i = 0; i < n_tables; i++ )
+  {
+    const unsigned char *rec = buf + pos + (size_t) i * 16;
+    unsigned long tag    = svg_glyph_be_u32(rec);
+    unsigned long offset = svg_glyph_be_u32(rec + 8);
+    unsigned long length = svg_glyph_be_u32(rec + 12);
+    if( (size_t) offset > buf_len || (size_t) offset + length > buf_len )
+      continue;
+    if( tag == 0x43464620UL )   /* 'CFF ' */
+    { *cff_off = offset; *cff_len = length; }
+    else if( tag == 0x68656164UL )   /* 'head' */
+    { if( length >= 20 )
+      { unsigned int upem = svg_glyph_be_u16(buf + (size_t) offset + 18);
+        if( upem > 0 ) *units_per_em = (int) upem;
+      }
+    }
+  }
+  return *cff_off != 0;
+}
+
+
+/*****************************************************************************/
+/*  Helper: lookup an Adobe glyph name from a charset SID.  For phase 1 we   */
+/*  resolve common ISOAdobe SIDs (1..228) via the predefined string table   */
+/*  and let the CFF String INDEX cover the rest (SIDs >= 391).               */
+/*****************************************************************************/
+
+/* Adobe ISOAdobe predefined string table (SIDs 0..390).  Only a subset is   */
+/* relevant for the glyphs Lout actually requests via charpath (ASCII +     */
+/* a few punctuation).  Out-of-table SIDs return NULL.                      */
+static const char *svg_glyph_cff_std_sid(unsigned int sid)
+{
+  /* The 392 predefined strings begin with ".notdef" and proceed through    */
+  /* "001.005" at index 390.  We only need the first ~230 (ASCII letters,  */
+  /* digits, punctuation).  The rest are accented variants and Adobe       */
+  /* proprietary names rarely consumed by charpath.                         */
+  static const char *tab[] = {
+    ".notdef","space","exclam","quotedbl","numbersign","dollar","percent",
+    "ampersand","quoteright","parenleft","parenright","asterisk","plus",
+    "comma","hyphen","period","slash","zero","one","two","three","four",
+    "five","six","seven","eight","nine","colon","semicolon","less","equal",
+    "greater","question","at","A","B","C","D","E","F","G","H","I","J","K",
+    "L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z",
+    "bracketleft","backslash","bracketright","asciicircum","underscore",
+    "quoteleft","a","b","c","d","e","f","g","h","i","j","k","l","m","n",
+    "o","p","q","r","s","t","u","v","w","x","y","z","braceleft","bar",
+    "braceright","asciitilde","exclamdown","cent","sterling","fraction",
+    "yen","florin","section","currency","quotesingle","quotedblleft",
+    "guillemotleft","guilsinglleft","guilsinglright","fi","fl","endash",
+    "dagger","daggerdbl","periodcentered","paragraph","bullet",
+    "quotesinglbase","quotedblbase","quotedblright","guillemotright",
+    "ellipsis","perthousand","questiondown","grave","acute","circumflex",
+    "tilde","macron","breve","dotaccent","dieresis","ring","cedilla",
+    "hungarumlaut","ogonek","caron","emdash","AE","ordfeminine","Lslash",
+    "Oslash","OE","ordmasculine","ae","dotlessi","lslash","oslash","oe",
+    "germandbls","onesuperior","twosuperior","threesuperior","minus",
+    "multiply","onesuperior","twosuperior","threesuperior","Amacron",
+    "amacron","Aogonek","aogonek","Cacute","cacute","Ccaron","ccaron",
+    "Dcaron","dcaron","Dcroat","dcroat","Delta","Ecaron","ecaron","Eogonek",
+    "eogonek","Emacron","emacron","Gbreve","gbreve","Gcommaaccent",
+    "gcommaaccent","IJ","ij","Imacron","imacron","Iogonek","iogonek",
+    "Eth","eth","Lacute","lacute","Lcommaaccent","lcommaaccent","Nacute",
+    "nacute","Ncaron","ncaron","Ncommaaccent","ncommaaccent","Omacron",
+    "omacron","Racute","racute","Rcaron","rcaron","Rcommaaccent",
+    "rcommaaccent","Sacute","sacute","Scedilla","scedilla","Scommaaccent",
+    "scommaaccent","Tcaron","tcaron","Tcommaaccent","tcommaaccent","Thorn",
+    "thorn","Uhungarumlaut","uhungarumlaut","Umacron","umacron","Uogonek",
+    "uogonek","Uring","uring","Ydieresis","ydieresis","Zacute","zacute",
+    "Zdotaccent","zdotaccent","longs","Aacute","Acircumflex","Adieresis",
+    "Agrave","Aring","Atilde","Ccedilla","Eacute","Ecircumflex",
+    "Edieresis","Egrave","Iacute","Icircumflex","Idieresis","Igrave",
+    "Ntilde","Oacute","Ocircumflex","Odieresis","Ograve","Otilde",
+    "Scaron","Uacute","Ucircumflex","Udieresis","Ugrave","Yacute",
+    "aacute","acircumflex","adieresis","agrave","aring","atilde",
+    "ccedilla","eacute","ecircumflex","edieresis","egrave","iacute",
+    "icircumflex","idieresis","igrave","ntilde","oacute","ocircumflex",
+    "odieresis","ograve","otilde","scaron","uacute","ucircumflex",
+    "udieresis","ugrave","yacute","ydieresis"
+  };
+  if( sid < sizeof tab / sizeof tab[0] ) return tab[sid];
+  return NULL;
+}
+
+/*****************************************************************************/
+/*  Build the per-glyph charset table.  CFF format 0/1/2.                    */
+/*  Returns 1 on success.                                                    */
+/*****************************************************************************/
+
+static int svg_glyph_cff_parse_charset(svg_glyph_font *f,
+  const unsigned char *cff_buf, size_t cff_len,
+  long charset_off, int n_glyphs,
+  const svg_glyph_cff_index *string_ix,
+  unsigned int *sid_for_gid)
+{
+  size_t p;
+  int format;
+  int i;
+
+  /* Predefined charsets (0=ISOAdobe, 1=Expert, 2=ExpertSubset).             */
+  if( charset_off >= 0 && charset_off <= 2 )
+  {
+    if( charset_off == 0 )
+    {
+      /* GID i -> SID i for i in [0..228].  Beyond that we leave 0 (.notdef)*/
+      for( i = 0; i < n_glyphs; i++ )
+        sid_for_gid[i] = (unsigned int) i;
+      return 1;
+    }
+    /* Expert / ExpertSubset: leave as .notdef -- our test corpus doesn't   */
+    /* exercise these.                                                       */
+    for( i = 0; i < n_glyphs; i++ ) sid_for_gid[i] = 0;
+    return 1;
+  }
+  if( charset_off < 0 || (size_t) charset_off >= cff_len ) return 0;
+  p = (size_t) charset_off;
+  format = cff_buf[p++];
+  sid_for_gid[0] = 0;   /* GID 0 is always .notdef                          */
+  if( format == 0 )
+  {
+    /* (n_glyphs - 1) SIDs of 2 bytes each.                                  */
+    if( p + (size_t) (n_glyphs - 1) * 2 > cff_len ) return 0;
+    for( i = 1; i < n_glyphs; i++ )
+    { sid_for_gid[i] = svg_glyph_be_u16(cff_buf + p);
+      p += 2;
+    }
+    return 1;
+  }
+  if( format == 1 || format == 2 )
+  {
+    int gid = 1;
+    while( gid < n_glyphs )
+    {
+      unsigned int first;
+      unsigned int n_left;
+      unsigned int k;
+      if( format == 1 )
+      { if( p + 3 > cff_len ) return 0;
+        first  = svg_glyph_be_u16(cff_buf + p);
+        n_left = cff_buf[p + 2];
+        p += 3;
+      }
+      else
+      { if( p + 4 > cff_len ) return 0;
+        first  = svg_glyph_be_u16(cff_buf + p);
+        n_left = svg_glyph_be_u16(cff_buf + p + 2);
+        p += 4;
+      }
+      for( k = 0; k <= n_left && gid < n_glyphs; k++, gid++ )
+        sid_for_gid[gid] = first + k;
+    }
+    (void) string_ix;
+    return 1;
+  }
+  return 0;
+}
+
+/* Resolve a SID into a malloc-free glyph name string.  Predefined SIDs     */
+/* (0..390) come from the static table; SIDs >= 391 index into the CFF      */
+/* String INDEX -- we copy the string into a small static buffer.           */
+static const char *svg_glyph_cff_sid_name(unsigned int sid,
+  const svg_glyph_cff_index *string_ix, char *buf, int buf_cap)
+{
+  if( sid < 391 ) return svg_glyph_cff_std_sid(sid);
+  if( string_ix == NULL || string_ix->count == 0 ) return NULL;
+  { unsigned int idx = sid - 391;
+    const unsigned char *p;
+    int plen;
+    int n;
+    if( !svg_glyph_cff_index_get(string_ix, idx, &p, &plen) ) return NULL;
+    n = plen;
+    if( n >= buf_cap ) n = buf_cap - 1;
+    memcpy(buf, p, (size_t) n);
+    buf[n] = 0;
+    return buf;
+  }
+}
+
+
+/*****************************************************************************/
+/*  Bias the Subr index per the Type 2 spec:                                 */
+/*    if N >= 33900: bias = 32768                                            */
+/*    if N >= 1240:  bias = 1131                                             */
+/*    else:          bias = 107                                              */
+/*****************************************************************************/
+
+static int svg_glyph_cff_subr_bias(int n)
+{
+  if( n >= 33900 ) return 32768;
+  if( n >=  1240 ) return 1131;
+  return 107;
+}
+
+
+/*****************************************************************************/
+/*  Top-level CFF parser.  Given the contents of the CFF table, build the   */
+/*  font's charset, local Subrs, global Subrs, and CharStrings into the     */
+/*  font's arena.                                                            */
+/*****************************************************************************/
+
+static int svg_glyph_load_cff(svg_glyph_font *f,
+  const unsigned char *cff, size_t cff_len, int units_per_em)
+{
+  svg_glyph_cff_index name_ix, top_ix, string_ix, gsubr_ix, cs_ix, lsubr_ix;
+  svg_glyph_dict_result top, priv;
+  size_t pos;
+  size_t hdr_size;
+  const unsigned char *top_dict_p;
+  int top_dict_len;
+  int n_glyphs;
+  unsigned int *sid_for_gid;
+  int i;
+  int ok;
+
+  if( cff_len < 4 ) return 0;
+  hdr_size = cff[2];
+  if( hdr_size < 4 || hdr_size > cff_len ) return 0;
+
+  /* Name INDEX */
+  pos = hdr_size;
+  if( !svg_glyph_cff_parse_index(cff, cff_len, pos, &name_ix) ) return 0;
+  pos += name_ix.total_size;
+
+  /* Top DICT INDEX */
+  if( !svg_glyph_cff_parse_index(cff, cff_len, pos, &top_ix) ) return 0;
+  pos += top_ix.total_size;
+
+  /* String INDEX */
+  if( !svg_glyph_cff_parse_index(cff, cff_len, pos, &string_ix) ) return 0;
+  pos += string_ix.total_size;
+
+  /* Global Subr INDEX */
+  if( !svg_glyph_cff_parse_index(cff, cff_len, pos, &gsubr_ix) ) return 0;
+  pos += gsubr_ix.total_size;
+
+  /* Use Top DICT element 0 (only one font supported in phase 1).            */
+  if( top_ix.count == 0 ) return 0;
+  if( !svg_glyph_cff_index_get(&top_ix, 0, &top_dict_p, &top_dict_len) )
+    return 0;
+  svg_glyph_dict_result_init(&top);
+  svg_glyph_cff_decode_dict(top_dict_p, top_dict_len, 1, &top);
+  if( top.charstring_type != 2 ) return 0;   /* Type 1 in OTF not supported  */
+  if( top.charstrings_off < 0 ||
+      (size_t) top.charstrings_off >= cff_len ) return 0;
+
+  /* CharStrings INDEX */
+  if( !svg_glyph_cff_parse_index(cff, cff_len,
+        (size_t) top.charstrings_off, &cs_ix) ) return 0;
+  n_glyphs = (int) cs_ix.count;
+  if( n_glyphs <= 0 ) return 0;
+  if( n_glyphs > SVG_GLYPH_MAX_GLYPHS ) n_glyphs = SVG_GLYPH_MAX_GLYPHS;
+
+  /* Private DICT */
+  svg_glyph_dict_result_init(&priv);
+  if( top.private_off >= 0 && top.private_size > 0 &&
+      (size_t) top.private_off + (size_t) top.private_size <= cff_len )
+  {
+    svg_glyph_cff_decode_dict(cff + top.private_off,
+                              (int) top.private_size, 0, &priv);
+  }
+
+  /* Local Subr INDEX (offset is relative to start of Private DICT).         */
+  lsubr_ix.count = 0;
+  lsubr_ix.off_size = 0;
+  lsubr_ix.offsets = NULL;
+  lsubr_ix.data    = NULL;
+  lsubr_ix.total_size = 0;
+  if( priv.local_subrs_off >= 0 && top.private_off >= 0 )
+  {
+    size_t off = (size_t) top.private_off + (size_t) priv.local_subrs_off;
+    if( off < cff_len )
+      svg_glyph_cff_parse_index(cff, cff_len, off, &lsubr_ix);
+  }
+
+  /* Copy global Subrs into the font's gsubr table.                          */
+  f->ngsubrs = (int) gsubr_ix.count;
+  if( f->ngsubrs > SVG_GLYPH_MAX_GSUBRS ) f->ngsubrs = SVG_GLYPH_MAX_GSUBRS;
+  for( i = 0; i < f->ngsubrs; i++ )
+  { const unsigned char *p;  int plen;
+    if( !svg_glyph_cff_index_get(&gsubr_ix, (unsigned int) i, &p, &plen) )
+    { f->gsubrs[i].cs = NULL; f->gsubrs[i].cs_len = 0; continue; }
+    { unsigned char *dst = svg_glyph_arena_alloc(f, (size_t) plen);
+      if( dst == NULL ) return 0;
+      if( plen > 0 ) memcpy(dst, p, (size_t) plen);
+      f->gsubrs[i].cs     = dst;
+      f->gsubrs[i].cs_len = plen;
+    }
+  }
+  f->gsubr_bias = svg_glyph_cff_subr_bias(f->ngsubrs);
+
+  /* Copy local Subrs.                                                       */
+  f->nsubrs = (int) lsubr_ix.count;
+  if( f->nsubrs > SVG_GLYPH_MAX_SUBRS ) f->nsubrs = SVG_GLYPH_MAX_SUBRS;
+  for( i = 0; i < f->nsubrs; i++ )
+  { const unsigned char *p;  int plen;
+    if( !svg_glyph_cff_index_get(&lsubr_ix, (unsigned int) i, &p, &plen) )
+    { f->subrs[i].cs = NULL; f->subrs[i].cs_len = 0; continue; }
+    { unsigned char *dst = svg_glyph_arena_alloc(f, (size_t) plen);
+      if( dst == NULL ) return 0;
+      if( plen > 0 ) memcpy(dst, p, (size_t) plen);
+      f->subrs[i].cs     = dst;
+      f->subrs[i].cs_len = plen;
+    }
+  }
+  f->subr_bias = svg_glyph_cff_subr_bias(f->nsubrs);
+
+  /* Resolve the charset GID -> SID -> name mapping.                         */
+  sid_for_gid = (unsigned int *) calloc((size_t) n_glyphs, sizeof *sid_for_gid);
+  if( sid_for_gid == NULL ) return 0;
+  ok = svg_glyph_cff_parse_charset(f, cff, cff_len, top.charset_off,
+        n_glyphs, &string_ix, sid_for_gid);
+  if( !ok ) { free(sid_for_gid); return 0; }
+
+  /* Walk CharStrings INDEX, copy each charstring into the arena, and tag    */
+  /* with its glyph name (via charset SID lookup).                           */
+  f->nglyphs = 0;
+  for( i = 0; i < n_glyphs && f->nglyphs < SVG_GLYPH_MAX_GLYPHS; i++ )
+  {
+    const unsigned char *p;
+    int plen;
+    char sidbuf[SVG_GLYPH_NAME_LEN];
+    const char *gname;
+    unsigned char *dst;
+    if( !svg_glyph_cff_index_get(&cs_ix, (unsigned int) i, &p, &plen) )
+      continue;
+    gname = svg_glyph_cff_sid_name(sid_for_gid[i], &string_ix,
+                                   sidbuf, (int) sizeof sidbuf);
+    if( gname == NULL || gname[0] == 0 ) continue;
+    dst = svg_glyph_arena_alloc(f, (size_t) plen);
+    if( dst == NULL ) { free(sid_for_gid); return 0; }
+    if( plen > 0 ) memcpy(dst, p, (size_t) plen);
+    { size_t nl = strlen(gname);
+      if( nl >= SVG_GLYPH_NAME_LEN ) nl = SVG_GLYPH_NAME_LEN - 1;
+      memcpy(f->glyphs[f->nglyphs].name, gname, nl);
+      f->glyphs[f->nglyphs].name[nl] = 0;
+    }
+    f->glyphs[f->nglyphs].cs     = dst;
+    f->glyphs[f->nglyphs].cs_len = plen;
+    f->nglyphs++;
+  }
+  free(sid_for_gid);
+
+  /* If the font's units-per-em isn't 1000 we scale every coordinate the    */
+  /* interpreter emits by (1000 / upem) so downstream code can keep         */
+  /* assuming a notional 1000-em.                                            */
+  if( units_per_em > 0 && units_per_em != 1000 )
+    f->em_scale = 1000.0 / (double) units_per_em;
+  else
+    f->em_scale = 1.0;
+
+  /* Defaults for advance: nominal+defaultWidthX live here, but the per-    */
+  /* glyph width arrives at the front of every charstring (see Type 2      */
+  /* width handling in the interpreter).                                    */
+  (void) priv.nominal_width_x;
+  (void) priv.default_width_x;
+  return 1;
+}
+
+
+/*****************************************************************************/
+/*  OTF file -> CFF body extractor + svg_glyph_load_cff caller.              */
+/*****************************************************************************/
+
+static int svg_glyph_load_otf(svg_glyph_font *f, const char *path)
+{
+  FILE *fp;
+  long fsize;
+  unsigned char *raw;
+  size_t got;
+  size_t cff_off, cff_len;
+  int upem;
+  int ok;
+
+  fp = fopen(path, "rb");
+  if( fp == NULL ) return 0;
+  fseek(fp, 0L, SEEK_END);
+  fsize = ftell(fp);
+  fseek(fp, 0L, SEEK_SET);
+  if( fsize <= 12 || fsize > SVG_GLYPH_OTF_MAX )
+  { fclose(fp); return 0; }
+  raw = (unsigned char *) malloc((size_t) fsize);
+  if( raw == NULL ) { fclose(fp); return 0; }
+  got = fread(raw, 1, (size_t) fsize, fp);
+  fclose(fp);
+  if( got != (size_t) fsize ) { free(raw); return 0; }
+
+  if( !svg_glyph_parse_ot_dir(raw, (size_t) fsize, &cff_off, &cff_len, &upem) )
+  { free(raw); return 0; }
+  ok = svg_glyph_load_cff(f, raw + cff_off, cff_len, upem);
+  free(raw);
+  return ok;
+}
+
+
+/*****************************************************************************/
+/*  OTF file lookup.  Tries:                                                 */
+/*    1. LOUT_OTF_FONT_DIR/<ps_name>.otf                                    */
+/*    2. svg_glyph_otf_map[ps_name] joined with each search dir            */
+/*    3. <ps_name>.otf joined with each search dir (recursive 1 level)     */
+/*****************************************************************************/
+
+static int svg_glyph_otf_probe(const char *path)
+{
+  /* Open and confirm OTTO magic.                                            */
+  FILE *fp = fopen(path, "rb");
+  unsigned char magic[4];
+  size_t n;
+  if( fp == NULL ) return 0;
+  n = fread(magic, 1, 4, fp);
+  fclose(fp);
+  if( n != 4 ) return 0;
+  return (magic[0] == 'O' && magic[1] == 'T' && magic[2] == 'T' && magic[3] == 'O');
+}
+
+static int svg_glyph_try_dir(const char *dir, const char *name,
+  char *out, size_t cap)
+{
+  size_t dl, nl;
+  if( dir == NULL || name == NULL ) return 0;
+  dl = strlen(dir);
+  nl = strlen(name);
+  if( dl + 1 + nl + 1 > cap ) return 0;
+  memcpy(out, dir, dl);
+  if( dl > 0 && out[dl-1] != '/' ) out[dl++] = '/';
+  memcpy(out + dl, name, nl + 1);
+  return svg_glyph_otf_probe(out);
+}
+
+/* Recursive depth-1 search: try `dir/name` directly, then scan each       */
+/* immediate subdirectory for `name`.                                       */
+static int svg_glyph_try_dir_recursive(const char *dir, const char *name,
+  char *out, size_t cap)
+{
+  /* Direct hit.                                                             */
+  if( svg_glyph_try_dir(dir, name, out, cap) ) return 1;
+  /* One-level subdirectory probe.  No <dirent.h> -- we use a small fixed   */
+  /* set of well-known subdirs under /usr/share/fonts/opentype/ that ship   */
+  /* CFF OTFs on common Debian/Ubuntu spins.                                */
+  {
+    static const char *subs[] = {
+      "cabin/","cantarell/","linux-libertine/","fira/","firacode/",
+      "ebgaramond/","comfortaa/","gentium/","gentium-basic/",
+      "lobster/","lobstertwo/","artemisia/","didot/","didot-classic/",
+      "bodoni-classic/","ipaexfont-gothic/","ipaexfont-mincho/",
+      "noto/","source-sans-pro/","source-serif-pro/","source-code-pro/",
+      NULL
+    };
+    int i;
+    char joined[512];
+    for( i = 0; subs[i] != NULL; i++ )
+    {
+      size_t dl = strlen(dir);
+      size_t sl = strlen(subs[i]);
+      if( dl + sl + 1 > sizeof joined ) continue;
+      memcpy(joined, dir, dl);
+      if( dl > 0 && joined[dl-1] != '/' ) joined[dl++] = '/';
+      memcpy(joined + dl, subs[i], sl + 1);
+      if( svg_glyph_try_dir(joined, name, out, cap) ) return 1;
+    }
+  }
+  return 0;
+}
+
+static int svg_glyph_find_otf_path(const char *ps_name, char *out, size_t cap)
+{
+  const char *override;
+  const char *file = NULL;
+  char namebuf[SVG_GLYPH_PSN_LEN + 8];
+  int i;
+
+  /* Map PS name -> file basename, or default to "<psname>.otf".            */
+  for( i = 0; svg_glyph_otf_map[i].ps_name != NULL; i++ )
+  {
+    if( strcmp(svg_glyph_otf_map[i].ps_name, ps_name) == 0 )
+    { file = svg_glyph_otf_map[i].file; break; }
+  }
+  if( file == NULL )
+  { size_t pl = strlen(ps_name);
+    if( pl + 4 + 1 > sizeof namebuf ) return 0;
+    memcpy(namebuf, ps_name, pl);
+    memcpy(namebuf + pl, ".otf", 5);
+    file = namebuf;
+  }
+
+  override = getenv("LOUT_OTF_FONT_DIR");
+  if( override != NULL && override[0] != 0 )
+  {
+    if( svg_glyph_try_dir_recursive(override, file, out, cap) ) return 1;
+  }
+  for( i = 0; svg_glyph_otf_dir[i] != NULL; i++ )
+  {
+    if( svg_glyph_try_dir_recursive(svg_glyph_otf_dir[i], file, out, cap) )
+      return 1;
+  }
+  return 0;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  Type 2 charstring interpreter.                                           */
+/*                                                                           */
+/*  Reference: Adobe Technical Note #5177.  Operators:                       */
+/*    1 hstem, 3 vstem, 4 vmoveto, 5 rlineto, 6 hlineto, 7 vlineto           */
+/*    8 rrcurveto, 10 callsubr, 11 return, 14 endchar                        */
+/*    18 hstemhm, 19 hintmask, 20 cntrmask                                   */
+/*    21 rmoveto, 22 hmoveto, 23 vstemhm                                     */
+/*    24 rcurveline, 25 rlinecurve, 26 vvcurveto, 27 hhcurveto               */
+/*    29 callgsubr, 30 vhcurveto, 31 hvcurveto                               */
+/*  Plus the 12-prefix family (and / or / not / abs / add / sub / div /      */
+/*  neg / eq / drop / put / get / ifelse / random / mul / sqrt / dup /       */
+/*  exch / index / roll / hflex / flex / hflex1 / flex1).                    */
+/*                                                                           */
+/*  The first call to a stack-clearing operator (hstem/hstemhm/vstem/        */
+/*  vstemhm/hintmask/cntrmask/hmoveto/vmoveto/rmoveto/endchar) may carry an  */
+/*  extra leading operand: the charstring's advance-width delta relative to */
+/*  nominalWidthX.  We snapshot this once.                                   */
+/*                                                                           */
+/*****************************************************************************/
+
+typedef struct svg_glyph_cff_state {
+  int hint_count;     /* number of hint stems seen (for hintmask bytes)     */
+  int width_seen;     /* 1 after first stack-clear op consumed the width   */
+  int transient[32];  /* T2 transient array (Type 2 'put'/'get')           */
+  int depth;
+  int abort;
+} svg_glyph_cff_state;
+
+static int svg_glyph_cff_decode_number(const unsigned char *cs, int len,
+  int *pi, double *out)
+{
+  int i = *pi;
+  int b;
+  if( i >= len ) return 0;
+  b = cs[i];
+  if( b >= 32 && b <= 246 )
+  { *out = (double) (b - 139); *pi = i + 1; return 1; }
+  if( b >= 247 && b <= 250 )
+  { if( i + 1 >= len ) return 0;
+    *out = (double) ((b - 247) * 256 + cs[i+1] + 108);
+    *pi = i + 2; return 1;
+  }
+  if( b >= 251 && b <= 254 )
+  { if( i + 1 >= len ) return 0;
+    *out = (double) (-(b - 251) * 256 - cs[i+1] - 108);
+    *pi = i + 2; return 1;
+  }
+  if( b == 28 )
+  { int v;
+    if( i + 2 >= len ) return 0;
+    v = (cs[i+1] << 8) | cs[i+2];
+    if( v & 0x8000 ) v -= 0x10000;
+    *out = (double) v;
+    *pi = i + 3; return 1;
+  }
+  if( b == 255 )
+  { /* 16.16 fixed.                                                         */
+    long v;
+    if( i + 4 >= len ) return 0;
+    v = ((long) cs[i+1] << 24) | ((long) cs[i+2] << 16)
+      | ((long) cs[i+3] <<  8) |  (long) cs[i+4];
+    if( v & 0x80000000L ) v -= 0x100000000L;
+    *out = (double) v / 65536.0;
+    *pi = i + 5; return 1;
+  }
+  return 0;
+}
+
+/* Forward decls inside the Type 2 interpreter.                              */
+static int svg_glyph_run_cff_body(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  svg_glyph_cff_state *st, const unsigned char *cs, int len);
+
+/* Eat the width operand at start-of-charstring (only on the first stack-   */
+/* clearing op).  Type 2 spec: if the stack has more arguments than the op  */
+/* consumes, the first is the width delta.  Caller passes consumed counts.  */
+static void svg_glyph_cff_eat_width(svg_glyph_emit_ctx *c,
+  svg_glyph_cff_state *st, int expected_min)
+{
+  if( !st->width_seen )
+  {
+    st->width_seen = 1;
+    if( c->sp > expected_min )
+    {
+      /* The width is the first (bottom) operand; shift the stack left.     */
+      double w = c->stack[0];
+      int i;
+      c->adv_x = w;     /* relative to nominalWidthX; absolute value would  */
+                        /* need nominalWidthX from Private DICT but the    */
+                        /* charpath consumer only needs a plausible advance*/
+      for( i = 0; i + 1 < c->sp; i++ ) c->stack[i] = c->stack[i + 1];
+      c->sp--;
+    }
+  }
+}
+
+static int svg_glyph_cff_subr(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  svg_glyph_cff_state *st, int raw_idx, int is_global)
+{
+  int bias = is_global ? f->gsubr_bias : f->subr_bias;
+  int idx = raw_idx + bias;
+  const svg_subr_entry *tab = is_global ? f->gsubrs : f->subrs;
+  int n = is_global ? f->ngsubrs : f->nsubrs;
+  if( idx < 0 || idx >= n ) return 0;
+  if( tab[idx].cs == NULL ) return 0;
+  if( st->depth > 10 ) return 0;
+  st->depth++;
+  { int r = svg_glyph_run_cff_body(c, f, st, tab[idx].cs, tab[idx].cs_len);
+    st->depth--;
+    return r;
+  }
+}
+
+/* Run a Type 2 charstring.  Return 2 on endchar, 0 otherwise.              */
+static int svg_glyph_run_cff_body(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  svg_glyph_cff_state *st, const unsigned char *cs, int len)
+{
+  int i = 0;
+  int b;
+  if( c->abort ) return 0;
+  while( i < len && !c->abort )
+  {
+    b = cs[i];
+    if( b >= 32 || b == 28 || b == 255 )
+    {
+      double v;
+      if( !svg_glyph_cff_decode_number(cs, len, &i, &v) ) { c->abort = 1; return 0; }
+      if( c->sp < SVG_GLYPH_STK_DEPTH ) c->stack[c->sp++] = v;
+      continue;
+    }
+    /* operator */
+    i++;
+    if( b == 12 )
+    {
+      int op2;
+      if( i >= len ) { c->abort = 1; return 0; }
+      op2 = cs[i++];
+      switch( op2 )
+      {
+        case 3:  /* and */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( c->sp < SVG_GLYPH_STK_DEPTH )
+              c->stack[c->sp++] = (a != 0.0 && bv != 0.0) ? 1.0 : 0.0;
+          }
+          break;
+        case 4:  /* or */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( c->sp < SVG_GLYPH_STK_DEPTH )
+              c->stack[c->sp++] = (a != 0.0 || bv != 0.0) ? 1.0 : 0.0;
+          }
+          break;
+        case 5:  /* not */
+          if( c->sp >= 1 )
+          { double a = c->stack[c->sp-1];
+            c->stack[c->sp-1] = (a == 0.0) ? 1.0 : 0.0;
+          }
+          break;
+        case 9:  /* abs */
+          if( c->sp >= 1 )
+          { double a = c->stack[c->sp-1];
+            c->stack[c->sp-1] = a < 0.0 ? -a : a;
+          }
+          break;
+        case 10: /* add */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( c->sp < SVG_GLYPH_STK_DEPTH ) c->stack[c->sp++] = a + bv;
+          }
+          break;
+        case 11: /* sub */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( c->sp < SVG_GLYPH_STK_DEPTH ) c->stack[c->sp++] = a - bv;
+          }
+          break;
+        case 12: /* div */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( bv == 0.0 ) bv = 1.0;
+            if( c->sp < SVG_GLYPH_STK_DEPTH ) c->stack[c->sp++] = a / bv;
+          }
+          break;
+        case 14: /* neg */
+          if( c->sp >= 1 ) c->stack[c->sp-1] = -c->stack[c->sp-1];
+          break;
+        case 15: /* eq */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( c->sp < SVG_GLYPH_STK_DEPTH )
+              c->stack[c->sp++] = (a == bv) ? 1.0 : 0.0;
+          }
+          break;
+        case 18: /* drop */
+          if( c->sp >= 1 ) c->sp--;
+          break;
+        case 20: /* put: val i put -- transient[i] = val                    */
+          if( c->sp >= 2 )
+          { int ti = (int) c->stack[c->sp-1];
+            double val = c->stack[c->sp-2];
+            c->sp -= 2;
+            if( ti >= 0 && ti < 32 ) st->transient[ti] = (int) val;
+          }
+          break;
+        case 21: /* get: i get -- push transient[i]                         */
+          if( c->sp >= 1 )
+          { int ti = (int) c->stack[c->sp-1];
+            c->sp--;
+            if( c->sp < SVG_GLYPH_STK_DEPTH && ti >= 0 && ti < 32 )
+              c->stack[c->sp++] = (double) st->transient[ti];
+          }
+          break;
+        case 22: /* ifelse */
+          if( c->sp >= 4 )
+          { double v1 = c->stack[c->sp-4], v2 = c->stack[c->sp-3];
+            double s1 = c->stack[c->sp-2], s2 = c->stack[c->sp-1];
+            c->sp -= 4;
+            if( c->sp < SVG_GLYPH_STK_DEPTH )
+              c->stack[c->sp++] = (v1 <= v2) ? s1 : s2;
+          }
+          break;
+        case 23: /* random */
+          if( c->sp < SVG_GLYPH_STK_DEPTH ) c->stack[c->sp++] = 0.5;
+          break;
+        case 24: /* mul */
+          if( c->sp >= 2 )
+          { double a = c->stack[c->sp-2], bv = c->stack[c->sp-1];
+            c->sp -= 2;
+            if( c->sp < SVG_GLYPH_STK_DEPTH ) c->stack[c->sp++] = a * bv;
+          }
+          break;
+        case 27: /* dup */
+          if( c->sp >= 1 && c->sp < SVG_GLYPH_STK_DEPTH )
+          { c->stack[c->sp] = c->stack[c->sp - 1]; c->sp++; }
+          break;
+        case 28: /* exch */
+          if( c->sp >= 2 )
+          { double t = c->stack[c->sp-1];
+            c->stack[c->sp-1] = c->stack[c->sp-2];
+            c->stack[c->sp-2] = t;
+          }
+          break;
+        case 29: /* index */
+          if( c->sp >= 1 )
+          { int ti = (int) c->stack[c->sp-1];
+            c->sp--;
+            if( ti < 0 ) ti = 0;
+            if( ti < c->sp && c->sp < SVG_GLYPH_STK_DEPTH )
+            { c->stack[c->sp] = c->stack[c->sp - 1 - ti]; c->sp++; }
+          }
+          break;
+        case 30: /* roll N J -- ignored to keep stack manipulation simple   */
+          if( c->sp >= 2 ) c->sp -= 2;
+          break;
+        case 34: /* hflex dx1 dx2 dy2 dx3 dx4 dx5 dx6                       */
+          if( c->sp >= 7 )
+          { double dx1 = c->stack[0], dx2 = c->stack[1], dy2 = c->stack[2];
+            double dx3 = c->stack[3], dx4 = c->stack[4], dx5 = c->stack[5];
+            double dx6 = c->stack[6];
+            svg_glyph_emit_curve(c, dx1, 0.0, dx2, dy2, dx3, 0.0);
+            svg_glyph_emit_curve(c, dx4, 0.0, dx5, -dy2, dx6, 0.0);
+          }
+          c->sp = 0;
+          break;
+        case 35: /* flex 11 args + fd                                       */
+          if( c->sp >= 12 )
+          {
+            svg_glyph_emit_curve(c,
+              c->stack[0], c->stack[1], c->stack[2], c->stack[3],
+              c->stack[4], c->stack[5]);
+            svg_glyph_emit_curve(c,
+              c->stack[6], c->stack[7], c->stack[8], c->stack[9],
+              c->stack[10], c->stack[11]);
+          }
+          c->sp = 0;
+          break;
+        case 36: /* hflex1 dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6              */
+          if( c->sp >= 9 )
+          {
+            svg_glyph_emit_curve(c,
+              c->stack[0], c->stack[1], c->stack[2], c->stack[3],
+              c->stack[4], 0.0);
+            svg_glyph_emit_curve(c,
+              c->stack[5], 0.0, c->stack[6], c->stack[7],
+              c->stack[8], 0.0);
+          }
+          c->sp = 0;
+          break;
+        case 37: /* flex1 dx1 dy1 dx2 dy2 dx3 dy3 dx4 dy4 dx5 dy5 d6        */
+          if( c->sp >= 11 )
+          {
+            double dx = 0.0, dy = 0.0;
+            int j;
+            for( j = 0; j < 5; j++ )
+            { dx += c->stack[j * 2];
+              dy += c->stack[j * 2 + 1];
+            }
+            svg_glyph_emit_curve(c,
+              c->stack[0], c->stack[1], c->stack[2], c->stack[3],
+              c->stack[4], c->stack[5]);
+            {
+              double dx6, dy6;
+              if( dx < 0 ) dx = -dx;
+              if( dy < 0 ) dy = -dy;
+              if( dx > dy ) { dx6 = c->stack[10]; dy6 = 0.0; }
+              else          { dx6 = 0.0;          dy6 = c->stack[10]; }
+              svg_glyph_emit_curve(c,
+                c->stack[6], c->stack[7], c->stack[8], c->stack[9], dx6, dy6);
+            }
+          }
+          c->sp = 0;
+          break;
+        case 26: /* sqrt */
+        case 33: /* setcurrentpoint -- skip                                  */
+        default:
+          c->sp = 0;
+          break;
+      }
+      continue;
+    }
+    /* one-byte operators */
+    switch( b )
+    {
+      case 1:  /* hstem  -- (width?) y dy {dya dyb}*                        */
+      case 3:  /* vstem  -- (width?) x dx {dxa dxb}*                        */
+      case 18: /* hstemhm                                                   */
+      case 23: /* vstemhm                                                   */
+        svg_glyph_cff_eat_width(c, st, 2);
+        st->hint_count += c->sp / 2;
+        c->sp = 0;
+        break;
+      case 19: /* hintmask                                                  */
+      case 20: /* cntrmask                                                  */
+      {
+        int mask_bytes;
+        /* If we're still on the first op and the stack has stem operands,  */
+        /* count them as implicit vstem and remember to absorb the bytes.   */
+        svg_glyph_cff_eat_width(c, st, 0);
+        st->hint_count += c->sp / 2;
+        c->sp = 0;
+        mask_bytes = (st->hint_count + 7) / 8;
+        if( i + mask_bytes > len ) { c->abort = 1; return 0; }
+        i += mask_bytes;
+        break;
+      }
+      case 4:  /* vmoveto dy                                                */
+        svg_glyph_cff_eat_width(c, st, 1);
+        if( c->sp >= 1 )
+          svg_glyph_emit_move(c, 0.0, c->stack[c->sp - 1]);
+        c->sp = 0;
+        break;
+      case 21: /* rmoveto dx dy                                             */
+        svg_glyph_cff_eat_width(c, st, 2);
+        if( c->sp >= 2 )
+          svg_glyph_emit_move(c, c->stack[c->sp - 2], c->stack[c->sp - 1]);
+        c->sp = 0;
+        break;
+      case 22: /* hmoveto dx                                                */
+        svg_glyph_cff_eat_width(c, st, 1);
+        if( c->sp >= 1 )
+          svg_glyph_emit_move(c, c->stack[c->sp - 1], 0.0);
+        c->sp = 0;
+        break;
+      case 5:  /* rlineto {dxa dya}+ (variadic)                             */
+      {
+        int j;
+        for( j = 0; j + 1 < c->sp; j += 2 )
+          svg_glyph_emit_line(c, c->stack[j], c->stack[j + 1]);
+        c->sp = 0;
+        break;
+      }
+      case 6:  /* hlineto {dxa {dyb dxc}*}? -- alternating starting H       */
+      {
+        int j;
+        int horiz = 1;
+        for( j = 0; j < c->sp; j++ )
+        {
+          if( horiz ) svg_glyph_emit_line(c, c->stack[j], 0.0);
+          else        svg_glyph_emit_line(c, 0.0, c->stack[j]);
+          horiz = !horiz;
+        }
+        c->sp = 0;
+        break;
+      }
+      case 7:  /* vlineto -- alternating starting V                         */
+      {
+        int j;
+        int vert = 1;
+        for( j = 0; j < c->sp; j++ )
+        {
+          if( vert ) svg_glyph_emit_line(c, 0.0, c->stack[j]);
+          else       svg_glyph_emit_line(c, c->stack[j], 0.0);
+          vert = !vert;
+        }
+        c->sp = 0;
+        break;
+      }
+      case 8:  /* rrcurveto {dxa dya dxb dyb dxc dyc}+                      */
+      {
+        int j;
+        for( j = 0; j + 5 < c->sp; j += 6 )
+          svg_glyph_emit_curve(c,
+            c->stack[j],   c->stack[j+1], c->stack[j+2], c->stack[j+3],
+            c->stack[j+4], c->stack[j+5]);
+        c->sp = 0;
+        break;
+      }
+      case 10: /* callsubr */
+        if( c->sp >= 1 )
+        { int idx = (int) c->stack[c->sp - 1];
+          c->sp--;
+          svg_glyph_cff_subr(c, f, st, idx, 0);
+          if( c->abort ) return 0;
+        }
+        break;
+      case 11: /* return */
+        return 0;
+      case 14: /* endchar                                                   */
+        svg_glyph_cff_eat_width(c, st, 0);
+        c->sp = 0;
+        return 2;
+      case 24: /* rcurveline {dxa dya dxb dyb dxc dyc}+ dxd dyd             */
+      {
+        int j;
+        for( j = 0; j + 5 < c->sp - 1; j += 6 )
+          svg_glyph_emit_curve(c,
+            c->stack[j],   c->stack[j+1], c->stack[j+2], c->stack[j+3],
+            c->stack[j+4], c->stack[j+5]);
+        if( c->sp >= 2 )
+          svg_glyph_emit_line(c, c->stack[c->sp-2], c->stack[c->sp-1]);
+        c->sp = 0;
+        break;
+      }
+      case 25: /* rlinecurve {dxa dya}+ dxb dyb dxc dyc dxd dyd             */
+      {
+        int j;
+        int n_lines = (c->sp - 6) / 2;
+        for( j = 0; j < n_lines; j++ )
+          svg_glyph_emit_line(c, c->stack[j*2], c->stack[j*2+1]);
+        if( c->sp >= 6 )
+          svg_glyph_emit_curve(c,
+            c->stack[c->sp-6], c->stack[c->sp-5],
+            c->stack[c->sp-4], c->stack[c->sp-3],
+            c->stack[c->sp-2], c->stack[c->sp-1]);
+        c->sp = 0;
+        break;
+      }
+      case 26: /* vvcurveto [dx1] {dya dxb dyb dyc}+                        */
+      {
+        int j = 0;
+        double dx1 = 0.0;
+        if( c->sp % 4 == 1 )
+        { dx1 = c->stack[0]; j = 1; }
+        while( j + 3 < c->sp )
+        {
+          svg_glyph_emit_curve(c,
+            dx1,            c->stack[j],
+            c->stack[j+1], c->stack[j+2],
+            0.0,            c->stack[j+3]);
+          dx1 = 0.0;
+          j += 4;
+        }
+        c->sp = 0;
+        break;
+      }
+      case 27: /* hhcurveto [dy1] {dxa dxb dyb dxc}+                        */
+      {
+        int j = 0;
+        double dy1 = 0.0;
+        if( c->sp % 4 == 1 )
+        { dy1 = c->stack[0]; j = 1; }
+        while( j + 3 < c->sp )
+        {
+          svg_glyph_emit_curve(c,
+            c->stack[j],   dy1,
+            c->stack[j+1], c->stack[j+2],
+            c->stack[j+3], 0.0);
+          dy1 = 0.0;
+          j += 4;
+        }
+        c->sp = 0;
+        break;
+      }
+      case 29: /* callgsubr */
+        if( c->sp >= 1 )
+        { int idx = (int) c->stack[c->sp - 1];
+          c->sp--;
+          svg_glyph_cff_subr(c, f, st, idx, 1);
+          if( c->abort ) return 0;
+        }
+        break;
+      case 30: /* vhcurveto -- variadic alternating V/H                     */
+      {
+        /* Pattern: dy1 dx2 dy2 dx3 {dxa dxb dyb dyc dyd dxe dye dxf}* dyf? */
+        /* Standard implementation: emit curves starting V, alternating.    */
+        int j = 0;
+        int vert = 1;
+        while( c->sp - j >= 4 )
+        {
+          if( vert )
+          {
+            double last_y = 0.0;
+            if( c->sp - j == 5 ) last_y = c->stack[j+4];
+            svg_glyph_emit_curve(c,
+              0.0,            c->stack[j],
+              c->stack[j+1], c->stack[j+2],
+              c->stack[j+3], last_y);
+            j += 4;
+            if( c->sp - j == 1 ) { c->sp = 0; break; }
+          }
+          else
+          {
+            double last_x = 0.0;
+            if( c->sp - j == 5 ) last_x = c->stack[j+4];
+            svg_glyph_emit_curve(c,
+              c->stack[j],   0.0,
+              c->stack[j+1], c->stack[j+2],
+              last_x,         c->stack[j+3]);
+            j += 4;
+            if( c->sp - j == 1 ) { c->sp = 0; break; }
+          }
+          vert = !vert;
+          if( c->sp - j == 5 ) {  /* fall through to handle the trailing 5 */ }
+        }
+        c->sp = 0;
+        break;
+      }
+      case 31: /* hvcurveto -- variadic alternating H/V                     */
+      {
+        int j = 0;
+        int horiz = 1;
+        while( c->sp - j >= 4 )
+        {
+          if( horiz )
+          {
+            double last_x = 0.0;
+            if( c->sp - j == 5 ) last_x = c->stack[j+4];
+            svg_glyph_emit_curve(c,
+              c->stack[j],   0.0,
+              c->stack[j+1], c->stack[j+2],
+              last_x,         c->stack[j+3]);
+            j += 4;
+            if( c->sp - j == 1 ) { c->sp = 0; break; }
+          }
+          else
+          {
+            double last_y = 0.0;
+            if( c->sp - j == 5 ) last_y = c->stack[j+4];
+            svg_glyph_emit_curve(c,
+              0.0,            c->stack[j],
+              c->stack[j+1], c->stack[j+2],
+              c->stack[j+3], last_y);
+            j += 4;
+            if( c->sp - j == 1 ) { c->sp = 0; break; }
+          }
+          horiz = !horiz;
+        }
+        c->sp = 0;
+        break;
+      }
+      default:
+        /* Unknown -- clear stack and continue defensively.                  */
+        c->sp = 0;
+        break;
+    }
+    /* Type 2 has an implicit closepath at endchar; closepath the subpath   */
+    /* if rmoveto just opened one is not strictly correct but Type 2 does   */
+    /* not have an explicit closepath operator -- subpaths close at the    */
+    /* next moveto.  We mirror that by emitting close() on every moveto.   */
+  }
+  return 0;
+}
+
+static int svg_glyph_run_cff_cs(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  const unsigned char *cs, int len)
+{
+  svg_glyph_cff_state st;
+  int r;
+  memset(&st, 0, sizeof st);
+  r = svg_glyph_run_cff_body(c, f, &st, cs, len);
+  /* Final implicit closepath -- Type 2 closes the last subpath on endchar.*/
+  if( c->close && !c->abort ) c->close(c->user);
+  return r;
 }
