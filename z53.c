@@ -258,6 +258,25 @@ extern int svg_glyph_emit_outline(
   void (*cb_curve)(void *, double, double, double, double, double, double),
   void (*cb_close)(void *));
 
+/* OpenType GSUB feature substitution service implemented in z53_glyph.c.   */
+/* For CFF/OTF fonts only (Type 1 PFB has no GSUB; TrueType GSUB is         */
+/* deferred).  Returns the substituted glyph-id within the CFF (>0) or 0   */
+/* if no substitution applies.  Currently parsed but not consumed at       */
+/* <text> emission time -- see the deferral comment on svg_emit_word_text  */
+/* below for the architectural reason.                                      */
+extern int svg_glyph_font_smcp_substitute(const char *ps_name,
+  unsigned int cp);
+extern int svg_glyph_font_onum_substitute(const char *ps_name,
+  unsigned int cp);
+extern int svg_glyph_font_has_feature(const char *ps_name, const char *tag4);
+
+/* Font-features hint bits stored on the active svg_gstate.  These are      */
+/* declarative -- a future change can wire them through to GSUB-driven    */
+/* glyph emission.  Phase 1 leaves them as a no-op pass-through; they      */
+/* default to 0 (no features) on every gstate init / gsave.                */
+#define SVG_FONT_FEATURE_SMCP   0x0001u
+#define SVG_FONT_FEATURE_ONUM   0x0002u
+
 /* Static 128 KB buffer for out_fp.  Kept here (not on the stack inside     */
 /* SVG_PrintInitialize) because setvbuf documents that the supplied buffer */
 /* must outlive the stream.  glibc's default for regular files is 4 KB;    */
@@ -1342,6 +1361,19 @@ static unsigned int svg_match_ligature(const FULL_CHAR *p, int *consumed)
 /*  ('i' or 'l') as the left member of the next kern pair -- the same       */
 /*  spacing PostScript would have computed against the digram's right edge. */
 /*                                                                           */
+/*  OpenType GSUB (smcp / onum, phase 1): the gstate carries a              */
+/*  font_features bitmask that requests OpenType feature substitution.       */
+/*  The substitution tables for CFF/OTF fonts are populated at font-load    */
+/*  time by z53_glyph.c's GSUB parser (svg_glyph_otf_parse_gsub) and        */
+/*  reachable via svg_glyph_font_smcp_substitute / _onum_substitute.  The   */
+/*  consumer side is NOT yet wired through this function: small-caps      */
+/*  glyphs and old-style figures have no Unicode codepoint of their own,   */
+/*  so the substituted GIDs cannot be referenced by the current <text>     */
+/*  emission path.  The architectural follow-up is to switch body text on  */
+/*  these features over to glyph-path emission (already supported by      */
+/*  z53_glyph.c for charpath).  Until then svg_emit_word_text ignores the  */
+/*  font-features hint -- it is recorded but not consumed.                 */
+/*                                                                           */
 /*****************************************************************************/
 
 static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
@@ -2044,6 +2076,12 @@ typedef struct svg_gstate {
   int    line_cap;
   int    line_join;
   double miter_limit;
+  /* OpenType font-features hint mask (SVG_FONT_FEATURE_*).  Declarative;  */
+  /* not yet consumed by the <text> emission path (small-caps glyphs     */
+  /* have no Unicode codepoint, so applying smcp at the codepoint level  */
+  /* is a no-op -- the consumer side awaits glyph-path emission for body */
+  /* text).  Copied by gsave / restored by grestore via struct-copy.      */
+  unsigned int font_features;
 } svg_gstate;
 
 /* Named textures recognised by the proc-body scanner inside              */
@@ -2762,6 +2800,7 @@ static void svg_ps_init(svg_ps_state *s)
   /* line-style: -1 means unset (omit on stroke, fall back to SVG default). */
   s->gs[0].line_cap    = -1;
   s->gs[0].line_join   = -1;
+  s->gs[0].font_features = 0;
   s->gs[0].miter_limit = -1.0;
   /* svg_var_* persist across SVG_PrintGraphicObject calls (PS userdict     */
   /* semantics); they are initialised once by svg_psinterp_init.            */

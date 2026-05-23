@@ -126,6 +126,17 @@ typedef struct svg_glyph_font {
   unsigned char  *arena;
   size_t          arena_used;
   size_t          arena_cap;
+  /* OpenType GSUB feature substitution maps (CFF/OTF only, phase 1).        */
+  /* Indexed by Latin-1 codepoint (0..255); the value is the substituted     */
+  /* glyph-id within the CFF, or 0 if no substitution.  Populated by         */
+  /* svg_glyph_otf_parse_gsub() when the OTF carries an smcp/onum feature   */
+  /* lookup of type 1 (single substitution).  Phase 1 records the table     */
+  /* but does NOT yet consume it at <text> emission time -- see the         */
+  /* comment on svg_glyph_otf_parse_gsub() for the architectural reason.    */
+  unsigned short  smcp_subst[256];
+  unsigned short  onum_subst[256];
+  int             has_smcp;     /* 1 if any smcp_subst entry is nonzero    */
+  int             has_onum;     /* 1 if any onum_subst entry is nonzero    */
 } svg_glyph_font;
 
 static svg_glyph_font svg_glyph_fonts[SVG_GLYPH_MAX_FONTS];
@@ -2160,6 +2171,410 @@ static int svg_glyph_load_cff(svg_glyph_font *f,
 
 
 /*****************************************************************************/
+/*  OpenType GSUB feature substitution parser.                                */
+/*                                                                            */
+/*  Scope:                                                                    */
+/*    - Locates the `GSUB` table in the OT table directory.                  */
+/*    - Walks Script/Feature/Lookup lists to find smcp / onum features.      */
+/*    - Only Lookup Type 1 (Single Substitution) is implemented.  Other     */
+/*      lookup types (alternate, ligature, contextual, chained-contextual)   */
+/*      are skipped; this covers the common case where smcp and onum are    */
+/*      compiled as one-to-one GID->GID maps.                                */
+/*    - Records the substitutions as a GID->GID array.  Then walks the      */
+/*      Adobe StandardEncoding to project Latin-1 codepoint -> source GID  */
+/*      and writes the resulting codepoint-keyed table into                 */
+/*      f->smcp_subst[256] / f->onum_subst[256].                            */
+/*                                                                            */
+/*  Phase 1 deferral note:                                                    */
+/*    The SVG back-end currently emits text via <text> elements containing  */
+/*    Unicode codepoints, NOT raw glyph-ids.  Small-caps glyphs and old-    */
+/*    style figures live at glyph positions that have no Unicode codepoint  */
+/*    of their own -- the only way to render them is to emit a path or to   */
+/*    reference the glyph by id inside an SVG <font>/`@font-face` block.    */
+/*    Until z53.c grows a glyph-path emission path for body text, the      */
+/*    substitution table is built but never consumed.  The public API      */
+/*    (svg_glyph_font_smcp_substitute / _onum_substitute) is provided so   */
+/*    a future change can flip the consumer side on without re-touching    */
+/*    the parser.                                                            */
+/*****************************************************************************/
+
+/* Locate the GSUB table inside the OT table directory.  Returns 1 on hit.  */
+static int svg_glyph_find_gsub(const unsigned char *buf, size_t buf_len,
+  size_t *gsub_off, size_t *gsub_len)
+{
+  unsigned int n_tables;
+  size_t pos;
+  unsigned int i;
+  *gsub_off = 0;
+  *gsub_len = 0;
+  if( buf_len < 12 ) return 0;
+  n_tables = svg_glyph_be_u16(buf + 4);
+  if( n_tables == 0 ) return 0;
+  pos = 12;
+  if( pos + (size_t) n_tables * 16 > buf_len ) return 0;
+  for( i = 0; i < n_tables; i++ )
+  {
+    const unsigned char *rec = buf + pos + (size_t) i * 16;
+    unsigned long tag    = svg_glyph_be_u32(rec);
+    unsigned long offset = svg_glyph_be_u32(rec + 8);
+    unsigned long length = svg_glyph_be_u32(rec + 12);
+    if( (size_t) offset > buf_len ||
+        (size_t) offset + length > buf_len ) continue;
+    if( tag == 0x47535542UL )   /* 'GSUB' */
+    { *gsub_off = offset; *gsub_len = length; return 1; }
+  }
+  return 0;
+}
+
+/* Callback context for coverage walks below.                              */
+struct svg_glyph_gsub_ctx {
+  const unsigned char *g;     /* GSUB body                                 */
+  size_t        g_len;
+  size_t        subtable_off; /* offset of the SingleSubst subtable        */
+  unsigned int  fmt;          /* 1 or 2                                    */
+  int           delta;        /* fmt 1: GID delta                          */
+  size_t        sub_arr_off;  /* fmt 2: offset of Substitute[] array       */
+  unsigned int  sub_arr_n;    /* fmt 2: count of Substitute[]              */
+  unsigned short *out_gid_map; /* GID-indexed substitution result          */
+  int           out_cap;      /* size of out_gid_map (typically nglyphs)   */
+};
+
+static void svg_glyph_single_subst_cb(unsigned int gid, unsigned int idx,
+  void *ud)
+{
+  struct svg_glyph_gsub_ctx *c = (struct svg_glyph_gsub_ctx *) ud;
+  int sub_gid = 0;
+  if( (int) gid >= c->out_cap ) return;
+  if( c->fmt == 1 )
+  {
+    /* delta is signed, wraps modulo 65536 per the OT spec.                */
+    sub_gid = ((int) gid + c->delta) & 0xFFFF;
+  }
+  else if( c->fmt == 2 )
+  {
+    if( idx >= c->sub_arr_n ) return;
+    if( c->sub_arr_off + (size_t) (idx + 1) * 2 > c->g_len ) return;
+    sub_gid = (int) svg_glyph_be_u16(c->g + c->sub_arr_off + (size_t) idx * 2);
+  }
+  if( sub_gid > 0 && sub_gid < c->out_cap )
+    c->out_gid_map[gid] = (unsigned short) sub_gid;
+}
+
+/* Walk a GSUB Coverage table at `cov_off` (relative to GSUB body) and call */
+/* the callback for each (covered_gid, coverage_index) pair.  Returns 1 on */
+/* success.  Used by the Lookup Type 1 walker below.                       */
+static int svg_glyph_walk_coverage(const unsigned char *g, size_t g_len,
+  size_t cov_off,
+  void (*cb)(unsigned int gid, unsigned int idx, void *ud), void *ud)
+{
+  unsigned int fmt;
+  if( cov_off + 4 > g_len ) return 0;
+  fmt = svg_glyph_be_u16(g + cov_off);
+  if( fmt == 1 )
+  {
+    unsigned int n = svg_glyph_be_u16(g + cov_off + 2);
+    size_t p = cov_off + 4;
+    unsigned int j;
+    if( p + (size_t) n * 2 > g_len ) return 0;
+    for( j = 0; j < n; j++ )
+    { unsigned int gid = svg_glyph_be_u16(g + p + (size_t) j * 2);
+      cb(gid, j, ud);
+    }
+    return 1;
+  }
+  if( fmt == 2 )
+  {
+    unsigned int n = svg_glyph_be_u16(g + cov_off + 2);
+    size_t p = cov_off + 4;
+    unsigned int j;
+    if( p + (size_t) n * 6 > g_len ) return 0;
+    for( j = 0; j < n; j++ )
+    { const unsigned char *r = g + p + (size_t) j * 6;
+      unsigned int start = svg_glyph_be_u16(r);
+      unsigned int end   = svg_glyph_be_u16(r + 2);
+      unsigned int sidx  = svg_glyph_be_u16(r + 4);
+      unsigned int gid;
+      if( end < start ) continue;
+      for( gid = start; gid <= end; gid++ )
+        cb(gid, sidx + (gid - start), ud);
+    }
+    return 1;
+  }
+  return 0;
+}
+
+/* Apply a single GSUB lookup (type 1) into out_gid_map.  Returns 1 on    */
+/* success (parsed cleanly), 0 on malformed input.  Non-type-1 lookups   */
+/* are silently skipped (caller treats as a no-op).                       */
+static int svg_glyph_apply_lookup(const unsigned char *g, size_t g_len,
+  size_t lookup_off, unsigned short *out_gid_map, int out_cap)
+{
+  unsigned int lookup_type, sub_count;
+  size_t p;
+  unsigned int i;
+  if( lookup_off + 6 > g_len ) return 0;
+  lookup_type = svg_glyph_be_u16(g + lookup_off);
+  /* lookup_flag at +2; mark_filter at +4 (skip).                          */
+  sub_count   = svg_glyph_be_u16(g + lookup_off + 4);
+  if( lookup_type != 1 ) return 1;  /* only Single Substitution in phase 1 */
+  p = lookup_off + 6;
+  if( p + (size_t) sub_count * 2 > g_len ) return 0;
+  for( i = 0; i < sub_count; i++ )
+  {
+    size_t st_off = lookup_off + (size_t) svg_glyph_be_u16(g + p + (size_t) i * 2);
+    unsigned int fmt;
+    struct svg_glyph_gsub_ctx ctx;
+    if( st_off + 6 > g_len ) continue;
+    fmt = svg_glyph_be_u16(g + st_off);
+    ctx.g            = g;
+    ctx.g_len        = g_len;
+    ctx.subtable_off = st_off;
+    ctx.fmt          = fmt;
+    ctx.delta        = 0;
+    ctx.sub_arr_off  = 0;
+    ctx.sub_arr_n    = 0;
+    ctx.out_gid_map  = out_gid_map;
+    ctx.out_cap      = out_cap;
+    if( fmt == 1 )
+    {
+      size_t cov = st_off + (size_t) svg_glyph_be_u16(g + st_off + 2);
+      short delta_s = (short) svg_glyph_be_u16(g + st_off + 4);
+      ctx.delta = (int) delta_s;
+      svg_glyph_walk_coverage(g, g_len, cov, svg_glyph_single_subst_cb, &ctx);
+    }
+    else if( fmt == 2 )
+    {
+      size_t cov = st_off + (size_t) svg_glyph_be_u16(g + st_off + 2);
+      unsigned int n = svg_glyph_be_u16(g + st_off + 4);
+      if( st_off + 6 + (size_t) n * 2 > g_len ) continue;
+      ctx.sub_arr_off = st_off + 6;
+      ctx.sub_arr_n   = n;
+      svg_glyph_walk_coverage(g, g_len, cov, svg_glyph_single_subst_cb, &ctx);
+    }
+  }
+  return 1;
+}
+
+/* Resolve a single GSUB feature (by tag) into a GID->GID substitution    */
+/* map.  Walks the default-language-system of the first script in the    */
+/* GSUB ScriptList (i.e. uses the script's default language).  This is   */
+/* sufficient for the Latin-only fonts shipped in the Adobe base-35 and  */
+/* common Linux desktop spins; multi-script fonts (CJK, etc.) are out of  */
+/* phase 1 scope.  Returns 1 if any substitution was recorded.            */
+static int svg_glyph_resolve_feature(const unsigned char *g, size_t g_len,
+  unsigned long want_tag, unsigned short *out_gid_map, int out_cap)
+{
+  size_t script_list, feature_list, lookup_list;
+  unsigned int n_scripts, n_features, n_lookups;
+  size_t pos;
+  unsigned int i;
+  unsigned int *want_lookup_idxs = NULL;
+  unsigned int want_n = 0;
+  int any = 0;
+  if( g_len < 10 ) return 0;
+  /* Header: majorVersion(u16) minorVersion(u16)                          */
+  /*         scriptListOffset(u16) featureListOffset(u16) lookupListOffset(u16) */
+  script_list  = (size_t) svg_glyph_be_u16(g + 4);
+  feature_list = (size_t) svg_glyph_be_u16(g + 6);
+  lookup_list  = (size_t) svg_glyph_be_u16(g + 8);
+  if( script_list  >= g_len || feature_list >= g_len ||
+      lookup_list  >= g_len ) return 0;
+
+  /* ScriptList: u16 scriptCount, then scriptCount * (Tag(4) + offset(u16)). */
+  /* We take the first script's defaultLangSysOff to gather the feature    */
+  /* indices that are active.                                              */
+  n_scripts = svg_glyph_be_u16(g + script_list);
+  if( n_scripts == 0 ) return 0;
+  pos = script_list + 2;
+  if( pos + 6 > g_len ) return 0;
+  {
+    size_t script_off = script_list +
+      (size_t) svg_glyph_be_u16(g + pos + 4);
+    size_t default_off;
+    unsigned int n_feat_idx;
+    size_t fp;
+    unsigned int j;
+    if( script_off + 4 > g_len ) return 0;
+    default_off = (size_t) svg_glyph_be_u16(g + script_off);
+    if( default_off == 0 ) return 0;
+    default_off += script_off;
+    if( default_off + 4 > g_len ) return 0;
+    /* defaultLangSys: u16 lookupOrderOff (=0) + u16 requiredFeatureIdx +  */
+    /*                 u16 featureIndexCount + u16[]                       */
+    n_feat_idx = svg_glyph_be_u16(g + default_off + 4);
+    fp = default_off + 6;
+    if( fp + (size_t) n_feat_idx * 2 > g_len ) return 0;
+    /* FeatureList: u16 featureCount + featureCount*(Tag(4) + offset(u16)).*/
+    if( feature_list + 2 > g_len ) return 0;
+    n_features = svg_glyph_be_u16(g + feature_list);
+    for( j = 0; j < n_feat_idx; j++ )
+    {
+      unsigned int fi = svg_glyph_be_u16(g + fp + (size_t) j * 2);
+      size_t frec, foff;
+      unsigned long ftag;
+      if( fi >= n_features ) continue;
+      frec = feature_list + 2 + (size_t) fi * 6;
+      if( frec + 6 > g_len ) continue;
+      ftag = svg_glyph_be_u32(g + frec);
+      if( ftag != want_tag ) continue;
+      foff = feature_list + (size_t) svg_glyph_be_u16(g + frec + 4);
+      if( foff + 4 > g_len ) continue;
+      /* Feature: u16 featureParamsOff + u16 lookupIndexCount + u16[]      */
+      want_n = svg_glyph_be_u16(g + foff + 2);
+      if( foff + 4 + (size_t) want_n * 2 > g_len ) { want_n = 0; continue; }
+      want_lookup_idxs = (unsigned int *) malloc(sizeof(unsigned int) * want_n);
+      if( want_lookup_idxs == NULL ) { want_n = 0; return 0; }
+      { unsigned int k;
+        for( k = 0; k < want_n; k++ )
+          want_lookup_idxs[k] = svg_glyph_be_u16(g + foff + 4 + (size_t) k * 2);
+      }
+      break;
+    }
+  }
+  if( want_lookup_idxs == NULL || want_n == 0 )
+  { if( want_lookup_idxs != NULL ) free(want_lookup_idxs);
+    return 0;
+  }
+
+  /* LookupList: u16 lookupCount + lookupCount * u16 offset.               */
+  if( lookup_list + 2 > g_len ) { free(want_lookup_idxs); return 0; }
+  n_lookups = svg_glyph_be_u16(g + lookup_list);
+  for( i = 0; i < want_n; i++ )
+  {
+    unsigned int li = want_lookup_idxs[i];
+    size_t lk_off;
+    if( li >= n_lookups ) continue;
+    if( lookup_list + 2 + (size_t) li * 2 + 2 > g_len ) continue;
+    lk_off = lookup_list +
+      (size_t) svg_glyph_be_u16(g + lookup_list + 2 + (size_t) li * 2);
+    if( svg_glyph_apply_lookup(g, g_len, lk_off, out_gid_map, out_cap) )
+      any = 1;
+  }
+  free(want_lookup_idxs);
+  return any;
+}
+
+/* Resolve a glyph name to its GID via f->glyphs[].  Returns -1 if absent. */
+static int svg_glyph_name_to_gid(const svg_glyph_font *f, const char *name)
+{
+  int i;
+  if( name == NULL || name[0] == 0 ) return -1;
+  for( i = 0; i < f->nglyphs; i++ )
+    if( strcmp(f->glyphs[i].name, name) == 0 ) return i;
+  return -1;
+}
+
+/* Project a GID->GID map into a Latin-1 codepoint -> GID map via the     */
+/* StandardEncoding glyph names.  Only nonzero entries are written.        */
+static void svg_glyph_project_subst(const svg_glyph_font *f,
+  const unsigned short *gid_map, int gid_cap, unsigned short *out_cp)
+{
+  unsigned int cp;
+  for( cp = 0; cp < 256; cp++ )
+  {
+    const char *gname = svg_glyph_std_enc[cp];
+    int gid;
+    if( gname == NULL ) continue;
+    gid = svg_glyph_name_to_gid(f, gname);
+    if( gid < 0 || gid >= gid_cap ) continue;
+    if( gid_map[gid] != 0 ) out_cp[cp] = gid_map[gid];
+  }
+}
+
+/* Top-level GSUB parser, called once per OTF after svg_glyph_load_cff.    */
+/* Populates f->smcp_subst[] / f->onum_subst[] and sets has_smcp/has_onum. */
+static void svg_glyph_otf_parse_gsub(svg_glyph_font *f,
+  const unsigned char *raw, size_t raw_len)
+{
+  size_t gsub_off, gsub_len;
+  unsigned short *gid_map = NULL;
+  int gid_cap;
+  if( f->nglyphs <= 0 ) return;
+  if( !svg_glyph_find_gsub(raw, raw_len, &gsub_off, &gsub_len) ) return;
+  if( gsub_len < 10 ) return;
+  gid_cap = f->nglyphs;
+  if( gid_cap > 65536 ) gid_cap = 65536;
+  gid_map = (unsigned short *) calloc((size_t) gid_cap, sizeof *gid_map);
+  if( gid_map == NULL ) return;
+
+  /* smcp = 0x736D6370 ('s','m','c','p')                                  */
+  if( svg_glyph_resolve_feature(raw + gsub_off, gsub_len,
+        0x736D6370UL, gid_map, gid_cap) )
+  {
+    svg_glyph_project_subst(f, gid_map, gid_cap, f->smcp_subst);
+    { int i;
+      for( i = 0; i < 256; i++ )
+        if( f->smcp_subst[i] != 0 ) { f->has_smcp = 1; break; }
+    }
+  }
+
+  /* Reset for the next feature.                                          */
+  memset(gid_map, 0, (size_t) gid_cap * sizeof *gid_map);
+
+  /* onum = 0x6F6E756D ('o','n','u','m')                                  */
+  if( svg_glyph_resolve_feature(raw + gsub_off, gsub_len,
+        0x6F6E756DUL, gid_map, gid_cap) )
+  {
+    svg_glyph_project_subst(f, gid_map, gid_cap, f->onum_subst);
+    { int i;
+      for( i = 0; i < 256; i++ )
+        if( f->onum_subst[i] != 0 ) { f->has_onum = 1; break; }
+    }
+  }
+  free(gid_map);
+}
+
+
+/*****************************************************************************/
+/*  Public API: GSUB feature substitution lookup.                            */
+/*                                                                            */
+/*  These two functions are the consumer-side entry points for OpenType       */
+/*  small-caps (smcp) and old-style figures (onum) substitutions.  They       */
+/*  return the substituted glyph-id (within the font's CFF charset) for the   */
+/*  given Latin-1 codepoint, or 0 if no substitution exists (font lacks the   */
+/*  feature, is not CFF/OTF, the codepoint is unmapped, or the substitution   */
+/*  uses a Lookup Type beyond Type 1).                                        */
+/*                                                                            */
+/*  Phase 1 status: the parser is live but no SVG emission path consumes the */
+/*  result yet.  See the deferral note above svg_glyph_otf_parse_gsub() and  */
+/*  lout/SVG_PORTING.md for the architectural blocker (small-caps glyphs    */
+/*  have no Unicode codepoint, so the current <text>-based emission cannot   */
+/*  reference them; glyph-path emission is the planned consumer).            */
+/*****************************************************************************/
+
+int svg_glyph_font_smcp_substitute(const char *ps_name, unsigned int cp)
+{
+  int fi;
+  if( ps_name == NULL || cp >= 256 ) return 0;
+  fi = svg_glyph_load_font(ps_name);
+  if( fi < 0 ) return 0;
+  if( !svg_glyph_fonts[fi].has_smcp ) return 0;
+  return (int) svg_glyph_fonts[fi].smcp_subst[cp];
+}
+
+int svg_glyph_font_onum_substitute(const char *ps_name, unsigned int cp)
+{
+  int fi;
+  if( ps_name == NULL || cp >= 256 ) return 0;
+  fi = svg_glyph_load_font(ps_name);
+  if( fi < 0 ) return 0;
+  if( !svg_glyph_fonts[fi].has_onum ) return 0;
+  return (int) svg_glyph_fonts[fi].onum_subst[cp];
+}
+
+int svg_glyph_font_has_feature(const char *ps_name, const char *tag4)
+{
+  int fi;
+  if( ps_name == NULL || tag4 == NULL ) return 0;
+  fi = svg_glyph_load_font(ps_name);
+  if( fi < 0 ) return 0;
+  if( strcmp(tag4, "smcp") == 0 ) return svg_glyph_fonts[fi].has_smcp;
+  if( strcmp(tag4, "onum") == 0 ) return svg_glyph_fonts[fi].has_onum;
+  return 0;
+}
+
+
+/*****************************************************************************/
 /*  OTF file -> CFF body extractor + svg_glyph_load_cff caller.              */
 /*****************************************************************************/
 
@@ -2189,6 +2604,11 @@ static int svg_glyph_load_otf(svg_glyph_font *f, const char *path)
   if( !svg_glyph_parse_ot_dir(raw, (size_t) fsize, &cff_off, &cff_len, &upem) )
   { free(raw); return 0; }
   ok = svg_glyph_load_cff(f, raw + cff_off, cff_len, upem);
+  /* Best-effort GSUB parse for smcp / onum.  Failures are silent: the      */
+  /* font simply ends up with empty substitution tables.  This must run    */
+  /* AFTER svg_glyph_load_cff because the projection step looks glyphs up   */
+  /* by name in f->glyphs[].                                                 */
+  if( ok ) svg_glyph_otf_parse_gsub(f, raw, (size_t) fsize);
   free(raw);
   return ok;
 }

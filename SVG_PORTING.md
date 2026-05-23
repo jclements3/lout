@@ -859,3 +859,28 @@ this round.
   (`tests/run_all.sh` -> 63/0, Pass-Excellent 63/63).  The new
   `graphic_rotated_show.lt` snippet guards the rotated-show fix
   against future regressions.
+
+- **OpenType GSUB features (smcp / onum), phase 1**.  The CFF/OTF
+  font loader in `z53_glyph.c` now also parses the `GSUB` table for
+  the small-caps (`smcp`) and old-style-figures (`onum`) features.
+  The parser walks Script -> default-LangSys -> Feature -> Lookup
+  lists, applies any Lookup Type 1 (Single Substitution, formats 1
+  and 2) subtables, and projects the resulting GID->GID map through
+  Adobe StandardEncoding into a Latin-1 codepoint -> GID table
+  stored on the `svg_glyph_font` record.  Public API:
+  `svg_glyph_font_smcp_substitute`, `svg_glyph_font_onum_substitute`,
+  `svg_glyph_font_has_feature`.  A new `font_features` bitmask field
+  on `svg_gstate` (declared in z53.c) anticipates the consumer side
+  but is not yet wired through: the current `<text>` emission path
+  in `svg_emit_word_text` writes Unicode codepoints, and small-caps
+  glyphs have no Unicode codepoint of their own, so applying the
+  substitution at the codepoint level is a no-op.  The architectural
+  follow-up is to switch body text on these features over to glyph-
+  path emission (already supported by `svg_glyph_emit_outline` for
+  charpath).  Other GSUB Lookup Types (2 multiple, 3 alternate, 4
+  ligature, 5/6 contextual, 7 extension, 8 reverse-chained) and
+  TrueType GSUB are out of phase 1 scope.  Tests:
+  `tests/snippets/text_smallcaps.lt` and
+  `tests/snippets/text_oldstyle_figures.lt` exercise the surrounding
+  text path but currently render lining figures and lower-case in
+  both back-ends (parser-only, consumer is the deferred work).
