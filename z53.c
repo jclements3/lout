@@ -108,6 +108,11 @@ static unsigned int svg_name_hash(const char *s);
 /* back document builds inside the same process.                             */
 static void svg_face_cache_clear(void);
 
+/* Forward decl: monotonic counter for <path id="textpath-N"> defs emitted   */
+/* by the textPath emitter.  Defined alongside g_psstate further down; the  */
+/* declaration is hoisted here so SVG_PrintInitialize can reset it.          */
+static int svg_textpath_id_next;
+
 /* Glyph-outline service implemented in z53_glyph.c.  Returns 1 if the      */
 /* font + glyph are known (and the callbacks have been called to lay down   */
 /* the outline), 0 to fall back to the caller's bbox approximation.  The    */
@@ -155,6 +160,9 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
   /* document, mirroring PostScript's own state.                            */
   svg_psinterp_init();
   svg_face_cache_clear();
+  /* Reset the textPath def-id counter so two consecutive document builds  */
+  /* in the same process produce identical SVG output.                     */
+  svg_textpath_id_next = 0;
   if( out_fp != NULL )
   {
     /* Larger fully-buffered I/O.  Safe to call before any writes; the      */
@@ -1635,6 +1643,7 @@ typedef struct svg_ps_state {
   BOOLEAN last_pt_valid;
   BOOLEAN have_cp;
   BOOLEAN had_geom;             /* TRUE if a path command was added */
+  BOOLEAN has_curve;            /* TRUE if a curveto/rcurveto landed in path */
 } svg_ps_state;
 
 /* xsize/ysize/xmark/ymark/loutf/loutv/louts mirror the corresponding PS-   */
@@ -1655,6 +1664,14 @@ static double svg_var_loutf, svg_var_loutv, svg_var_louts;
 /* parts of PS execution state that the standard library relies on        */
 /* spanning multiple back-end calls.                                      */
 static svg_ps_state g_psstate;
+
+/* Counter for unique <path id="textpath-N"> defs emitted by the textPath    */
+/* emitter (svg_ps_emit_textpath_show).  Monotonic across the whole document */
+/* so IDs never collide between pages or @Graphic invocations.  Reset to 0  */
+/* by SVG_PrintInitialize so two consecutive document builds in the same    */
+/* process produce identical SVG.  (Definition - the forward decl higher up */
+/* in the file is the tentative declaration; both merge into one symbol.)   */
+static int svg_textpath_id_next;
 
 
 /* Forward */
@@ -2232,6 +2249,7 @@ static void svg_ps_init(svg_ps_state *s)
   s->last_pt_valid = FALSE;
   s->have_cp = FALSE;
   s->had_geom = FALSE;
+  s->has_curve = FALSE;
 }
 
 
@@ -2415,6 +2433,9 @@ static void svg_ps_curveto(svg_ps_state *s,
   s->last_yp = yp3;
   s->last_pt_valid = TRUE;
   s->have_cp = TRUE;
+  /* Flag curve-bearing path so a subsequent `show` between this and the    */
+  /* matching newpath/stroke/fill routes through the SVG textPath emitter.  */
+  s->has_curve = TRUE;
 }
 
 
@@ -2646,6 +2667,7 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
     s->had_geom = FALSE;
     s->have_cp = FALSE;
     s->last_pt_valid = FALSE;
+    s->has_curve = FALSE;
     return;
   }
   fputs("<path d=\"", out_fp);
@@ -2715,6 +2737,7 @@ static void svg_ps_emit_path(svg_ps_state *s, int do_stroke, int do_fill)
   s->had_geom = FALSE;
   s->have_cp = FALSE;
   s->last_pt_valid = FALSE;
+  s->has_curve = FALSE;
 }
 
 
@@ -3266,6 +3289,103 @@ static void svg_collect_to_mark(svg_ps_state *s, svg_value *out)
 
 /*****************************************************************************/
 /*                                                                           */
+/*  svg_ps_emit_textpath_show - render `str` along the path currently held   */
+/*  in the path accumulator.                                                 */
+/*                                                                           */
+/*  Triggered from SVG_OP_SHOW when the path between the last `newpath`     */
+/*  (or fill/stroke) and the current `show` contains at least one curveto.  */
+/*  Static text would lose the curve-following effect, so instead we emit:  */
+/*                                                                           */
+/*    <defs><path id="textpath-N" d="..."/></defs>                          */
+/*    <text font-family=... font-size=... fill=...>                          */
+/*      <textPath href="#textpath-N">CONTENT</textPath>                      */
+/*    </text>                                                                */
+/*                                                                           */
+/*  No counter-flip wrapper is needed: textPath renders along the path in   */
+/*  the local coordinate system, and `s->path` is already written in that  */
+/*  frame (the surrounding <g> chain mirrors the path-delta the same way   */
+/*  svg_ps_show's translate would have).  The path accumulator is reset    */
+/*  afterwards exactly as svg_ps_emit_path does for stroke/fill, so a      */
+/*  subsequent unrelated stroke does not re-emit the same path data.       */
+/*                                                                           */
+/*****************************************************************************/
+
+static void svg_ps_emit_textpath_show(svg_ps_state *s, const char *str)
+{
+  svg_gstate *g;
+  const char *p;
+  unsigned int c;
+  double size_pt;
+  int is_bold, is_italic;
+  const char *fname;
+  const char *col;
+  int id;
+
+  if( out_fp == NULL || str == NULL || str[0] == '\0' )
+    return;
+  g = &s->gs[s->gs_top];
+  if( g->clip_empty )
+    return;
+
+  size_pt = g->font_size / (double) PT;
+  if( size_pt <= 0.0 ) size_pt = 10.0;
+
+  fname = g->font_name[0] != '\0' ? g->font_name : "Times-Roman";
+  is_bold = (strstr(fname, "Bold") != NULL);
+  is_italic = (strstr(fname, "Italic") != NULL ||
+               strstr(fname, "Oblique") != NULL ||
+               strstr(fname, "Slope")  != NULL);
+
+  col = g->fill_rgb[0] != '\0' ? g->fill_rgb :
+        (g->stroke_rgb[0] != '\0' ? g->stroke_rgb : NULL);
+  /* Fold explicit black to currentColor so the surrounding CSS color:      */
+  /* cascade can re-tint this glyph block under dark mode (matches          */
+  /* svg_ps_show's behaviour after the May 2026 currentColor fold).         */
+  if( col != NULL && strcmp(col, "rgb(0,0,0)") == 0 )
+    col = "currentColor";
+  else if( col == NULL )
+    col = "currentColor";
+
+  id = svg_textpath_id_next++;
+
+  fprintf(out_fp, "<defs><path id=\"textpath-%d\" d=\"", id);
+  fputs(s->path, out_fp);
+  fputs("\"/></defs>\n", out_fp);
+
+  fprintf(out_fp,
+    "<text font-family=\"%s\" font-size=\"%.3f\"", fname, size_pt);
+  if( is_bold )
+    fputs(" font-weight=\"bold\"", out_fp);
+  if( is_italic )
+    fputs(" font-style=\"italic\"", out_fp);
+  if( col != NULL )
+    fprintf(out_fp, " fill=\"%s\"", col);
+  fprintf(out_fp, "><textPath href=\"#textpath-%d\">", id);
+  for( p = str; *p != '\0'; p++ )
+  {
+    c = (unsigned int) (unsigned char) *p;
+    svg_emit_utf8(c);
+  }
+  fputs("</textPath></text>\n", out_fp);
+
+  /* Advance cur_x by an approximate string width so subsequent rmoveto /   */
+  /* show sequences in the prologue land in the right ballpark.            */
+  s->cur_x += (double) strlen(str) * g->font_size * 0.5;
+
+  /* Consume the path: the curve geometry has been promoted into a <defs>   */
+  /* entry, so any later stroke/fill would otherwise re-emit the same data */
+  /* as a duplicate visible <path>.  Mirror svg_ps_emit_path's reset block. */
+  s->path[0] = '\0';
+  s->plen = 0;
+  s->had_geom = FALSE;
+  s->have_cp = FALSE;
+  s->last_pt_valid = FALSE;
+  s->has_curve = FALSE;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  svg_ps_show - emit a <text> element rendering the byte-string `str` at   */
 /*  the current point in the active font.  The string is byte-iterated;     */
 /*  bytes >= 0x80 are passed through as Latin-1 -> UTF-8 (sufficient for     */
@@ -3677,6 +3797,7 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     s->had_geom = FALSE;
     s->have_cp = FALSE;
     s->last_pt_valid = FALSE;
+    s->has_curve = FALSE;
     return 1;
   case SVG_OP_MOVETO:
     b = svg_ps_pop(s); a = svg_ps_pop(s);
@@ -4123,9 +4244,19 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   case SVG_OP_SHOW:
   {
     /* <string> show -- render at the current point in the active font.    */
+    /* If the active path between the last newpath/stroke/fill and now    */
+    /* contains a curveto, route through the SVG textPath emitter so the  */
+    /* glyphs follow the curve.  Straight-line paths fall through to the  */
+    /* legacy svg_ps_show which emits a static <text> at the current      */
+    /* point -- unchanged from the pre-textPath behaviour.                 */
     svg_value v = svg_ps_pop_value(s);
     if( v.kind == SVG_VK_STRING && v.name != NULL )
-      svg_ps_show(s, v.name);
+    {
+      if( s->had_geom && s->has_curve )
+        svg_ps_emit_textpath_show(s, v.name);
+      else
+        svg_ps_show(s, v.name);
+    }
     return 1;
   }
   case SVG_OP_STRINGWIDTH:
@@ -5919,6 +6050,7 @@ static void SVG_PrintGraphicObject(OBJECT x)
   g_psstate.last_pt_valid = FALSE;
   g_psstate.have_cp = FALSE;
   g_psstate.had_geom = FALSE;
+  g_psstate.has_curve = FALSE;
   if( cur_gr_set )
   {
     svg_var_xsize = (double) cur_gr_xsize;
