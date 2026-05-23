@@ -3245,6 +3245,8 @@ typedef enum {
   SVG_OP_LOUTCURVEBOX, SVG_OP_LOUTSHADOWBOX, SVG_OP_LOUTGR2,
   SVG_OP_SAVE_CP,
   SVG_OP_LOUTTEXTURESOLID, SVG_OP_LOUTSETTEXTURE, SVG_OP_LOUTMAKETEXTURE,
+  SVG_OP_LOUTPAGEDICT, SVG_OP_LOUTPAGESET,
+  SVG_OP_LOUTMARGSET, SVG_OP_LOUTMARGSHIFT,
   /* dictionary ops */
   SVG_OP_DICT, SVG_OP_BEGIN, SVG_OP_END, SVG_OP_CURRENTDICT,
   SVG_OP_SYSDICT,
@@ -3366,6 +3368,29 @@ static const struct { const char *name; svg_op_id id; } svg_op_seed[] = {
   {"LoutTextureSolid", SVG_OP_LOUTTEXTURESOLID},
   {"LoutSetTexture", SVG_OP_LOUTSETTEXTURE},
   {"LoutMakeTexture", SVG_OP_LOUTMAKETEXTURE},
+  /* Page / margin chrome (bsf.lpg, dsf).  bsf.lpg's `LoutPageSet` /            */
+  /* `LoutMargSet` / `LoutMargShift` definitions are run when the prepend      */
+  /* file is ingested, but the resulting userdict entries live in a            */
+  /* throw-away interpreter state (see svg_ingest_prepend_files, ~line 5611)  */
+  /* and so are absent from the persistent state that handles per-page         */
+  /* @Place / @MargPut graphic bodies.  Without explicit ops here the          */
+  /* names fall into the "unknown PostScript operator" path and the trailing  */
+  /* `begin` / `setmatrix` / pop sequence corrupts the stack.  We define       */
+  /* C-side stand-ins that keep the stack balanced and (best-effort)          */
+  /* preserve the surrounding gsave/translate/grestore so @Place'd boxes      */
+  /* render at roughly the right position.  See SVG_INCLUDES_AUDIT.md.        */
+  {"LoutPageDict",  SVG_OP_LOUTPAGEDICT},
+  {"LoutPageSet",   SVG_OP_LOUTPAGESET},
+  {"LoutMargSet",   SVG_OP_LOUTMARGSET},
+  {"LoutMargShift", SVG_OP_LOUTMARGSHIFT},
+  /* `matr` is the matrix that LoutMargSet / LoutPageSet capture via          */
+  /* `matrix currentmatrix def`.  It is referenced inside @Place / @MargPut   */
+  /* bodies as `matr setmatrix`.  Since our LoutPageDict / LoutMargSet         */
+  /* stand-ins do not populate that slot, alias `matr` to `matrix`: this      */
+  /* pushes a fresh identity 6-element array, so the subsequent setmatrix    */
+  /* consumes a well-formed operand and the CTM ends up as identity          */
+  /* (effectively a no-op for the @Place coordinate-frame reset).            */
+  {"matr",          SVG_OP_MATRIX},
   /* dictionary ops */
   {"dict", SVG_OP_DICT}, {"begin", SVG_OP_BEGIN}, {"end", SVG_OP_END},
   {"currentdict", SVG_OP_CURRENTDICT},
@@ -4193,6 +4218,59 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     svg_ps_push(s, &out);
     return 1;
   }
+  case SVG_OP_LOUTPAGEDICT:
+  {
+    /* bsf.lpg: `/LoutPageDict 5 dict def` inside LoutPageSet.  In @Place      */
+    /* bodies the name is referenced *before* any LoutPageSet has been         */
+    /* persistently re-executed in our state, so a real lookup would fail and  */
+    /* the trailing `begin matr setmatrix x y translate end gsave ...          */
+    /* grestore` would corrupt the operand stack.  Push the userdict slot     */
+    /* as a stand-in -- identical strategy to the SYSDICT alias group --      */
+    /* so `begin`/`end` are balanced and the `matr setmatrix` step lands on  */
+    /* an identity matrix (`matr` is aliased to the `matrix` op, which       */
+    /* pushes a fresh 6-element identity array).                              */
+    svg_value out;
+    out.kind = SVG_VK_DICT;
+    out.num = 0.0;
+    out.name = NULL;
+    out.items = NULL;
+    out.nitems = 0;
+    out.dict_id = svg_dict_stack[0];
+    svg_ps_push(s, &out);
+    return 1;
+  }
+  case SVG_OP_LOUTPAGESET:
+    /* bsf.lpg: takes no operands.  Side effect is to define LoutPageDict /   */
+    /* matr / left / right / foot / top inside userdict.  We accept the call  */
+    /* as a no-op -- the LoutPageDict / matr stand-ins above absorb the        */
+    /* subsequent references.  Emit a one-line XML comment for traceability;  */
+    /* this fires at most once per page (from dsf's @PageSet branch).         */
+    if( out_fp != NULL )
+      fputs("<!-- z53.c: LoutPageSet (page-dict init, no-op in SVG mode) -->\n",
+        out_fp);
+    return 1;
+  case SVG_OP_LOUTMARGSET:
+    /* bsf.lpg: `parity LoutMargSet -` (consumes 1 operand: the parity).  In  */
+    /* PostScript this builds LoutMargDict for the subsequent @MargPut /      */
+    /* LoutMargShift sequence.  In SVG mode margin notes are unsupported     */
+    /* (see SVG_INCLUDES_AUDIT.md); pop the parity to keep the stack clean.  */
+    (void) svg_ps_pop_value(s);
+    if( out_fp != NULL )
+      fputs("<!-- z53.c: LoutMargSet (margin notes unsupported in SVG mode) -->\n",
+        out_fp);
+    return 1;
+  case SVG_OP_LOUTMARGSHIFT:
+    /* bsf.lpg: `type LoutMargShift -` (consumes 1 operand: the margin       */
+    /* type -- 0=left, 1=right, 2=outer, 3=inner).  In PostScript it         */
+    /* translates the CTM so subsequent drawing lands in the margin.  In    */
+    /* SVG mode the surrounding gsave/grestore still emits an empty <g>     */
+    /* group; the body simply renders at the page origin instead of the     */
+    /* margin.  Pop the operand to keep the stack consistent.                */
+    (void) svg_ps_pop_value(s);
+    if( out_fp != NULL )
+      fputs("<!-- z53.c: LoutMargShift (margin notes unsupported in SVG mode) -->\n",
+        out_fp);
+    return 1;
 
   /* dictionary ops */
   case SVG_OP_DICT:

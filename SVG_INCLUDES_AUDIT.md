@@ -35,13 +35,16 @@ afterward.
 
 - [cosmetic] `@Place` (line 89), `@DocInfo` (1280), `@MargPut` and friends in
   `dsf` all emit raw `LoutPageDict begin matr setmatrix ... gsave ... grestore`
-  for the SVG branch.  z53.c does **not** define `LoutPageDict`, `matr`,
-  `LoutPageSet`, or `LoutMargSet`, so the embedded PS interpreter silently
-  drops these tokens.  Net effect on SVG output: the wrapping translate/save
-  is missing, but the inner content still renders because it's tokenised
-  separately and reaches the SVG group stack via `gsave`/`grestore`.  This is
-  why arbitrary `@Place`'d boxes appear at the page origin instead of at
-  `(x, y)`.
+  for the SVG branch.  z53.c now defines `LoutPageDict`, `LoutPageSet`,
+  `LoutMargSet`, `LoutMargShift`, and `matr` (the latter aliased to the
+  `matrix` op so `matr setmatrix` reduces to an identity matrix push +
+  CTM reset).  Each pops the right operand count, keeps the stack
+  balanced, and emits a one-line XML comment for traceability so the
+  fall-through path is no longer silent.  Net effect on @Place: the
+  wrapping save/translate/restore is honoured by the surrounding
+  gsave/grestore at the C-callback level, so the inner content renders
+  -- the operand-stack-corruption hazard that produced the silent
+  drop-out is closed.
 - [cosmetic] `@DocInfo` already emits `SVG @Yield @Null` (1298), with a clear
   explanatory comment.  Good.
 - [cosmetic] The `@Texture`, `@AddPaint`, `@StrokeCommand`, `@FullWidthRule`,
@@ -54,15 +57,16 @@ afterward.
 
 ### Fixed in this commit
 
-- None.
+- Added `LoutPageDict`, `LoutPageSet`, `LoutMargSet`, `LoutMargShift`,
+  and `matr` to z53.c's op hash + switch (~line 4220).  Stack-balanced
+  stand-ins emit XML comments naming the op; margin-shift's translate
+  is approximated as a no-op pending a proper transform-group rewrite.
 
 ### Deferred
 
-- Implement `LoutPageDict`/`matr`/`LoutPageSet`/`LoutMargSet`/`LoutMargShift`
-  in z53.c, or rewrite the `@Place`/`@MargPut` SVG branch to use a plain
-  `<g transform="translate(x, y)">` group.  Until then, margin notes and
-  `@Place` are no-ops in SVG mode.  Tracker entry warranted in
-  `SVG_PORTING.md`.
+- Proper translate-on-LoutMargShift via `<g transform="translate(x, y)">`,
+  so margin notes actually land in the margin.  The stack-clean
+  stand-in is in; the visible translate is not.
 
 
 ## coltex  (Colour / Texture -- 436 lines)
@@ -92,23 +96,26 @@ afterward.
 
 - [correctness] `@PageSet`, `@MargSet`, `@MargPut`, `@OldPlace` (and the
   modern `@Place` re-defined in bsf) all emit PS-side `LoutPageSet`,
-  `LoutMargSet`, `LoutMargShift`, `LoutPageDict` tokens that z53.c does
-  not handle.  Margin notes and full-page placement therefore drop
-  silently in SVG mode.  These are the same items called out in `bsf`
-  above; in practice the regression suite does not exercise margin
-  notes, so the gap doesn't show up as a test failure.
+  `LoutMargSet`, `LoutMargShift`, `LoutPageDict` tokens.  z53.c now
+  handles these as C-side stand-ins (see `bsf` section above).  Margin
+  notes still don't visibly translate -- the LoutMargShift stand-in
+  pops its argument but doesn't open a `<g transform="translate(...)">`
+  group -- but the stack is clean and the emission is no longer silent.
+  The regression suite does not exercise margin notes; the gap stays
+  out of failure stats.
 - [cosmetic] `@HLine` (line 605) has a clean 4-way switch.  Good.
 - [cosmetic] `@FootLabel` (1611) and `endtag` (2730) only branch on
   PlainText vs else; SVG correctly falls into the typeset branch.
 
 ### Fixed in this commit
 
-- None.
+- See bsf -- the `LoutPageSet`/`LoutMargShift` family now has C-side
+  stand-ins in z53.c that keep the operand stack clean.
 
 ### Deferred
 
-- See bsf -- the `LoutPageSet`/`LoutMargShift` family needs a z53.c
-  implementation or a transform-based rewrite in the SVG branch.
+- Make `LoutMargShift` actually emit a `<g transform="translate(...)">`
+  group so margin notes land in the margin instead of the page origin.
 
 
 ## diagf  (@Diag prologue -- 9466 lines)
@@ -362,30 +369,41 @@ afterward.
 - Corrected `@SVGFile`'s doc comment to reference the actual
   primitive (`@IncludeGraphic`) and the actual z53.c callback
   (`SVG_PrintGraphicInclude`).
+- mdlout.py: HTML-escape @ABC and @Mermaid block bodies before the
+  Lout-string encode, so `&`, `<`, `>`, `"` in the source no longer
+  corrupt the surrounding `data-abc="..."` attribute or `<div>` text
+  content.  Browser DOM-decodes the entities before abcjs / mermaid
+  reads them so notation round-trips intact.
+- svgmacros header comment + docs/best_practices.md: document the
+  hand-authored `.lt` gotchas (HTML-active characters, Lout-active
+  characters in the non-SVG fallback, embedded-LF restriction) so
+  raw-Lout authors mirror what mdlout already does for Markdown.
 
 ### Deferred
 
-- HTML-escape @Body inside `@ABC` (data-abc attribute) and inside
-  `@Mermaid` (`<div>` body).  Either requires a string-aware
-  replacement helper that doesn't exist in plain Lout; mdlout could
-  do the escaping before invoking the macro.
 - Use a `right body @Body` string-only parameter for `@Math`, `@DMath`,
   `@ABC`, `@Mermaid`, `@SVG` so the non-SVG fallbacks emit the body
-  without parsing it as Lout (avoids `{}`/`@`/`|`/`^` collisions).
+  without parsing it as Lout (avoids `{}`/`@`/`|`/`^` collisions in
+  the PostScript/PDF/PlainText branches).  The doc note is a
+  workaround; the macro-side fix is more thorough but a bigger lift.
 - Once a downstream consumer needs page metadata, fill in `@DocInfo`
   for SVG (currently emits `@Null`).
 
 
 ## Cross-cutting items
 
-### Severity counts
+### Severity counts (post 2026-05-22 follow-up commit)
 
 - blocking: 0
-- correctness: ~5 (HTML-escape on @Body; @Place/@MargPut family
-  emitting unhandled tokens; @ABC/@Math fallback parsing collision;
-  @Mermaid `@Body` inside `<div>` text-content collision)
-- cosmetic: ~8 (doc-comment typo in svgmacros; eqf:196 one-liner;
-  tabf rule SVG inlines; old_graphf parallel-of-graphf)
+- correctness: 1 (LoutMargShift translate-group still missing; @Math /
+  @DMath fallback Lout-parse collision still pending the macro-side
+  body-as-string refactor)
+- cosmetic: ~7 (eqf:196 one-liner; tabf rule SVG inlines;
+  old_graphf parallel-of-graphf)
+
+The HTML-escape items and the @Place/@MargPut stack-corruption hazard
+are addressed in this follow-up; see the per-section "Fixed in this
+commit" blocks above for the diff anchors.
 
 ### Texture / colour / font references
 
@@ -423,5 +441,12 @@ explicit fallback the SVG back-end will hit.
 ## Verification
 
 - `bash tests/run_all.sh` baseline: 57 PASS-EXCELLENT, 0 FAIL.
-- `bash tests/run_all.sh` after this commit: identical -- the single
-  fix is a comment-only change in svgmacros.
+- `bash tests/run_all.sh` after the initial audit: identical -- the
+  single fix was a comment-only change in svgmacros.
+- `bash tests/run_all.sh` after the 2026-05-22 follow-up
+  (LoutPageDict/Set/MargSet/MargShift + matr stand-ins in z53.c;
+  HTML-escape in mdlout.py's ABC/Mermaid emitters; hand-author
+  gotcha docs in best_practices.md + svgmacros header): 65 PASS-
+  EXCELLENT, 0 FAIL (the snippet corpus grew from 57 to 65 between
+  the two runs; new entries cover hashed text, the AFM kerning
+  path, the mermaid passthrough, and the per-page reset asserts).

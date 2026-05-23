@@ -26,6 +26,24 @@
 #   slides; keeping it opt-in avoids polluting the symbol table for       #
 #   users who don't need these passthroughs.                              #
 #                                                                         #
+#   GOTCHAS FOR HAND-AUTHORED @Body.  The five macros below pass @Body    #
+#   through to the back-end *unchanged*.  Two consequences for raw .lt    #
+#   authors (mdlout sanitises these automatically -- see                  #
+#   docs/best_practices.md "Hand-authoring @Math / @ABC / @Mermaid"):     #
+#                                                                         #
+#     (a) Active HTML characters (`&`, `<`, `>`, `"`) in @Body land       #
+#         verbatim in the surrounding `<foreignObject>` attribute or      #
+#         text content in SVG mode and corrupt the markup.  HTML-encode   #
+#         on the way in (`&amp;`, `&lt;`, `&gt;`, `&quot;`); the browser  #
+#         DOM-decodes before the JS engines see it.                       #
+#                                                                         #
+#     (b) Active Lout characters (`{`, `}`, `@`, `|`, `^`) in @Body       #
+#         break the PostScript/PDF/PlainText fallback branches, which     #
+#         emit @Body as ordinary Lout-parsed words.  Wrap the entire     #
+#         body in a Lout `"..."` literal at the call site so Lout's      #
+#         lexer treats it as one atomic word; only `"`, `\\`, and        #
+#         embedded newlines need escaping inside the literal.            #
+#                                                                         #
 ###########################################################################
 
 
