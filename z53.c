@@ -2562,6 +2562,36 @@ typedef struct svg_gstate {
   /* is a no-op -- the consumer side awaits glyph-path emission for body */
   /* text).  Copied by gsave / restored by grestore via struct-copy.      */
   unsigned int font_features;
+  /* Snapshot of the current path at the moment this gstate level was     */
+  /* pushed by gsave / save.  PostScript semantics require that gsave     */
+  /* snapshot the *whole* graphics state, including the current path,    */
+  /* and that grestore restore both.  The idiom                          */
+  /*                                                                      */
+  /*     <build path> gsave fill grestore stroke                          */
+  /*                                                                      */
+  /* relies on this: fill consumes the path locally, grestore puts it    */
+  /* back, and the trailing stroke paints the border.  Without these     */
+  /* fields the second draw saw an empty path and silently emitted       */
+  /* nothing -- e.g. every LoutBox border in the User's Guide (page 308  */
+  /* and ~559 other sites) was invisible.                                 */
+  /*                                                                      */
+  /* Populated by svg_op_h_gsave / SVG_OP_SAVE just AFTER the parent      */
+  /* struct-copy advances gs_top, and consumed by svg_op_h_grestore /     */
+  /* SVG_OP_RESTORE just BEFORE gs_top is decremented.  The struct copy  */
+  /* itself transparently carries any older saved_path (from a deeper     */
+  /* gsave) along, so nested gsave/grestore chains behave correctly.     */
+  /*                                                                      */
+  /* Cost: SVG_PATH_BUF_SIZE (16 KB) per gstate slot, times              */
+  /* SVG_PS_GS_DEPTH (32) -> ~512 KB static.  Acceptable for a one-shot  */
+  /* document build.                                                      */
+  char    saved_path[SVG_PATH_BUF_SIZE];
+  int     saved_plen;
+  BOOLEAN saved_had_geom;
+  BOOLEAN saved_have_cp;
+  BOOLEAN saved_has_curve;
+  BOOLEAN saved_last_pt_valid;
+  double  saved_cur_x, saved_cur_y;
+  double  saved_last_xp, saved_last_yp;
 } svg_gstate;
 
 /* Named textures recognised by the proc-body scanner inside              */
@@ -3282,6 +3312,22 @@ static void svg_ps_init(svg_ps_state *s)
   s->gs[0].line_join   = -1;
   s->gs[0].font_features = 0;
   s->gs[0].miter_limit = -1.0;
+  /* saved_* slots are written by gsave/save and consumed by grestore/      */
+  /* restore.  gs[0] should never be popped (the grestore handler guards    */
+  /* gs_top > 0), so its saved_* fields are nominally unreachable -- zero  */
+  /* them anyway so the initial struct copy on the first gsave doesn't     */
+  /* propagate uninitialised bytes up the stack, and so a stray grestore  */
+  /* at depth 0 (which the guard rejects) couldn't read garbage.           */
+  s->gs[0].saved_path[0]      = '\0';
+  s->gs[0].saved_plen         = 0;
+  s->gs[0].saved_had_geom     = FALSE;
+  s->gs[0].saved_have_cp      = FALSE;
+  s->gs[0].saved_has_curve    = FALSE;
+  s->gs[0].saved_last_pt_valid = FALSE;
+  s->gs[0].saved_cur_x        = 0.0;
+  s->gs[0].saved_cur_y        = 0.0;
+  s->gs[0].saved_last_xp      = 0.0;
+  s->gs[0].saved_last_yp      = 0.0;
   /* svg_var_* persist across SVG_PrintGraphicObject calls (PS userdict     */
   /* semantics); they are initialised once by svg_psinterp_init.            */
   s->path[0] = '\0';
@@ -4910,19 +4956,57 @@ static int svg_op_h_setlinewidth(svg_ps_state *s)
   return 1;
 }
 
+/*  PostScript gsave snapshots the *current path* in addition to the         */
+/*  graphics state proper.  Mirror that here: after the struct-copy that     */
+/*  carries gstate fields up to the new top, also stash the live path and   */
+/*  cursor-state fields into the new top's saved_* slot.  svg_op_h_grestore */
+/*  reads them back before popping.                                          */
 static int svg_op_h_gsave(svg_ps_state *s)
 {
+  svg_gstate *dest;
   if( s->gs_top + 1 < SVG_PS_GS_DEPTH )
   {
     s->gs[s->gs_top + 1] = s->gs[s->gs_top];
     s->gs_top++;
+    dest = &s->gs[s->gs_top];
+    if( s->plen > 0 )
+      memcpy(dest->saved_path, s->path, (size_t) s->plen + 1);
+    else
+      dest->saved_path[0] = '\0';
+    dest->saved_plen          = s->plen;
+    dest->saved_had_geom      = s->had_geom;
+    dest->saved_have_cp       = s->have_cp;
+    dest->saved_has_curve     = s->has_curve;
+    dest->saved_last_pt_valid = s->last_pt_valid;
+    dest->saved_cur_x         = s->cur_x;
+    dest->saved_cur_y         = s->cur_y;
+    dest->saved_last_xp       = s->last_xp;
+    dest->saved_last_yp       = s->last_yp;
   }
   return 1;
 }
 
 static int svg_op_h_grestore(svg_ps_state *s)
 {
-  if( s->gs_top > 0 ) s->gs_top--;
+  svg_gstate *src;
+  if( s->gs_top > 0 )
+  {
+    src = &s->gs[s->gs_top];
+    if( src->saved_plen > 0 )
+      memcpy(s->path, src->saved_path, (size_t) src->saved_plen + 1);
+    else
+      s->path[0] = '\0';
+    s->plen          = src->saved_plen;
+    s->had_geom      = src->saved_had_geom;
+    s->have_cp       = src->saved_have_cp;
+    s->has_curve     = src->saved_has_curve;
+    s->last_pt_valid = src->saved_last_pt_valid;
+    s->cur_x         = src->saved_cur_x;
+    s->cur_y         = src->saved_cur_y;
+    s->last_xp       = src->saved_last_xp;
+    s->last_yp       = src->saved_last_yp;
+    s->gs_top--;
+  }
   return 1;
 }
 
@@ -5111,14 +5195,31 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
     /* PS `save` snapshots the entire VM (graphics, dict, allocation modes)  */
     /* and pushes a save-object on the operand stack.  z53.c's interpreter   */
     /* tracks only the graphics state here, so the snapshot reduces to a    */
-    /* gsave -- copy the current gstate, advance gs_top.  We also push a   */
-    /* sentinel (NULL value) for `save` so a trailing `restore` finds      */
-    /* something to pop: the @Fig prologue uses `save ... restore` and     */
-    /* would otherwise underflow the operand stack.                        */
+    /* gsave -- copy the current gstate, advance gs_top, and stash the     */
+    /* live path + cursor state into the new top's saved_* slot exactly    */
+    /* like svg_op_h_gsave.  We also push a sentinel (NULL value) for     */
+    /* `save` so a trailing `restore` finds something to pop: the @Fig     */
+    /* prologue uses `save ... restore` and would otherwise underflow the */
+    /* operand stack.                                                      */
     if( s->gs_top + 1 < SVG_PS_GS_DEPTH )
     {
+      svg_gstate *dest;
       s->gs[s->gs_top + 1] = s->gs[s->gs_top];
       s->gs_top++;
+      dest = &s->gs[s->gs_top];
+      if( s->plen > 0 )
+        memcpy(dest->saved_path, s->path, (size_t) s->plen + 1);
+      else
+        dest->saved_path[0] = '\0';
+      dest->saved_plen          = s->plen;
+      dest->saved_had_geom      = s->had_geom;
+      dest->saved_have_cp       = s->have_cp;
+      dest->saved_has_curve     = s->has_curve;
+      dest->saved_last_pt_valid = s->last_pt_valid;
+      dest->saved_cur_x         = s->cur_x;
+      dest->saved_cur_y         = s->cur_y;
+      dest->saved_last_xp       = s->last_xp;
+      dest->saved_last_yp       = s->last_yp;
     }
     {
       svg_value sv;
@@ -5134,9 +5235,27 @@ static int svg_ps_exec_op(svg_ps_state *s, const char *name)
   case SVG_OP_RESTORE:
     /* PS `restore` consumes the save-object on top of the stack and       */
     /* unwinds VM state to the matching `save`.  Mirror the gstate pop;    */
-    /* eat the save-object sentinel (any value will do -- we don't check). */
+    /* restore path + cursor state from the popped slot's saved_*; eat    */
+    /* the save-object sentinel (any value will do -- we don't check).    */
     (void) svg_ps_pop_value(s);
-    if( s->gs_top > 0 ) s->gs_top--;
+    if( s->gs_top > 0 )
+    {
+      svg_gstate *src = &s->gs[s->gs_top];
+      if( src->saved_plen > 0 )
+        memcpy(s->path, src->saved_path, (size_t) src->saved_plen + 1);
+      else
+        s->path[0] = '\0';
+      s->plen          = src->saved_plen;
+      s->had_geom      = src->saved_had_geom;
+      s->have_cp       = src->saved_have_cp;
+      s->has_curve     = src->saved_has_curve;
+      s->last_pt_valid = src->saved_last_pt_valid;
+      s->cur_x         = src->saved_cur_x;
+      s->cur_y         = src->saved_cur_y;
+      s->last_xp       = src->saved_last_xp;
+      s->last_yp       = src->saved_last_yp;
+      s->gs_top--;
+    }
     return 1;
   case SVG_OP_TRANSLATE:
   {
