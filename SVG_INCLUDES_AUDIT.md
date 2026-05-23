@@ -438,6 +438,42 @@ Scan turned up zero `@BackEnd @Case` blocks with a PostScript branch
 but no SVG branch and no `else` fallback.  Every PS-only block has an
 explicit fallback the SVG back-end will hit.
 
+Re-confirmed 2026-05-23 with a fresh balanced-brace Python scan over
+every file in `lout/include/`: 258 `@BackEnd @Case` blocks total, none
+of which combine PostScript with neither SVG nor `else`.  The blocks
+without a literal `SVG @Yield` (57 of the 258, all in `bsf`, `bluef`,
+`cprintf`, `docf`, `dsf`, `eiffelf`, `haskellf`, `javaf`,
+`javascriptf`, `npf`, `perlf`, `podf`, `pythonf`, `rslf`, `rubyf`,
+`tblf`, `tclf`) every one uses the `PlainText @Yield ... else @Yield
+...` shape, so SVG falls through to the typeset `else` arm
+correctly.
+
+### Residual `replacing unknown @Case option SVG by PostScript` warnings
+
+The build warnings observed on the SVG path of `lout/doc/design`
+(96 warnings on the 2026-05-23 run) and `lout/doc/expert` (235
+warnings on the same run) trace exclusively to `@BackEnd @Case`
+blocks **inside the doc sources themselves**, not to anything in
+`include/`.  Originating files:
+
+- `doc/design/mydefs` (4 sites: `@HLine`, `@VDashLine`, `@LBox`,
+  `@LittlePage` -- each PostScript+PDF, no SVG, no `else`)
+- `doc/design/s2_3`, `doc/design/s3_2`, `doc/design/s5_2`
+  (in-text figure bodies)
+- `doc/expert/pre_colo`, `pre_conc`, `pre_cont`, `pre_cove`,
+  `pre_data`, `pre_grap`, `pre_hmir`, `pre_lang`, `pre_oner`,
+  `pre_rota`, `pre_scal`, `preface`, `pri`, `pri_cros`,
+  `pri_defi`, `pri_gall`, `pri_obje`, `det_gall`, `det_size`
+  (each demonstrates a `@BackEnd @Case` example in running
+  prose, PostScript+PDF only)
+
+Those blocks were authored when only `PostScript` and `PDF` were
+live back-ends.  They need a peer `SVG @Yield` (mirroring
+PostScript -- z53.c's embedded interpreter runs the PS body) to
+stop firing the warning.  Fixing them is out of scope for the
+include/-only audit; they are tracked by the doc-rendering work
+stream.
+
 ## Verification
 
 - `bash tests/run_all.sh` baseline: 57 PASS-EXCELLENT, 0 FAIL.
@@ -450,3 +486,12 @@ explicit fallback the SVG back-end will hit.
   EXCELLENT, 0 FAIL (the snippet corpus grew from 57 to 65 between
   the two runs; new entries cover hashed text, the AFM kerning
   path, the mermaid passthrough, and the per-page reset asserts).
+- `bash tests/run_all.sh` after the 2026-05-23 re-confirmation
+  pass: 87 PASS-EXCELLENT, 0 FAIL.  This pass touched no
+  `lout/include/*` source file because the rescan found no
+  remaining PS-without-SVG-and-without-else gap in include/.  The
+  surviving SVG-case warnings live in `lout/doc/{design,expert}/*`
+  and are tracked by the doc-rendering work stream, not by this
+  audit.  Design-build warning count before this pass: 96; after:
+  96 (unchanged -- no include/ change can affect them).  Expert
+  build warning count before: 235; after: 235 (same reason).
