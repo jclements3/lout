@@ -163,6 +163,27 @@ Out-of-scope follow-ups (left for a future round):
     are emitted unhinted; variation axes are not honoured.
   - TrueType collection (`.ttc`) wrappers.  We only accept top-
     level sfnt files; embedded TTCs fall through to the bbox.
+  - CFF predefined charsets 1 (Expert) and 2 (ExpertSubset).
+    These are fixed GID->SID maps baked into the CFF 1.0 spec
+    (Appendix C: 166 and 87 entries respectively).  No font in
+    the Lout corpus declares them, so they remain stubbed to
+    `.notdef`.  See the comment block above
+    `svg_glyph_cff_parse_charset` in `z53_glyph.c`.
+
+Update 2026-05-23: small audit follow-ups in `z53_glyph.c`:
+  - Type 2 escape op 26 (`sqrt`) now implements a Newton-Raphson
+    iteration in place of the prior silent drop.  Op 33
+    (`setcurrentpoint`) is documented as a Type 1 leftover that
+    Type 2 charstrings should never emit.
+  - Composite-glyph WE_HAVE_INSTRUCTIONS (0x0100) and
+    OVERLAP_COMPOUND (0x0400) handling explicitly documented: the
+    former is naturally skipped because we return on the last
+    component before reaching the instruction stream; the latter
+    is a fill-rule hint that SVG's non-zero default already honours.
+  - Empty TTF glyph cases (zero-length glyf entry, and 10-byte
+    header with `numberOfContours == 0`) both verified safe -- the
+    first returns early in `svg_glyph_run_ttf`, the second in
+    `svg_glyph_emit_simple`.
 
 Touches: `z53.c` + new `z53_glyph.c` + `makefile`.  No
 `include/` changes; the PostScript back end (`z49.c`) is

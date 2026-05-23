@@ -1813,6 +1813,19 @@ static int svg_glyph_cff_parse_charset(svg_glyph_font *f,
   int i;
 
   /* Predefined charsets (0=ISOAdobe, 1=Expert, 2=ExpertSubset).             */
+  /*                                                                          */
+  /* Per CFF 1.0 Appendix C, charsets 1 and 2 are *fixed GID->SID maps*       */
+  /* baked into the spec (Expert: 166 entries; ExpertSubset: 87).  We don't   */
+  /* embed the full tables here because: (a) the SIDs reference Adobe Expert  */
+  /* encoding glyph names ("fl", "centsuperior", "Aacutesmall", ...) that     */
+  /* svg_glyph_cff_std_sid() does not enumerate beyond ~390 anyway, and       */
+  /* (b) Lout's font corpus is exclusively ISOAdobe-encoded -- no document    */
+  /* in tests/ or examples/ links a font that declares charset 1 or 2.        */
+  /*                                                                          */
+  /* If a future font does, the glyphs beyond .notdef will resolve to NULL    */
+  /* names and silently fall through to the AGL/cmap fast paths in the TTF    */
+  /* loader (or be skipped); rendering will degrade gracefully rather than    */
+  /* crash.  Tracked in NEXT_OPTIMIZATIONS.md (CFF Expert charset gap).       */
   if( charset_off >= 0 && charset_off <= 2 )
   {
     if( charset_off == 0 )
@@ -1822,8 +1835,7 @@ static int svg_glyph_cff_parse_charset(svg_glyph_font *f,
         sid_for_gid[i] = (unsigned int) i;
       return 1;
     }
-    /* Expert / ExpertSubset: leave as .notdef -- our test corpus doesn't   */
-    /* exercise these.                                                       */
+    /* Expert / ExpertSubset: see comment above.                              */
     for( i = 0; i < n_glyphs; i++ ) sid_for_gid[i] = 0;
     return 1;
   }
@@ -2531,9 +2543,23 @@ static int svg_glyph_run_cff_body(svg_glyph_emit_ctx *c, svg_glyph_font *f,
           }
           c->sp = 0;
           break;
-        case 26: /* sqrt */
-        case 33: /* setcurrentpoint -- skip                                  */
+        case 26: /* sqrt -- pop 1, push sqrt(top); negative input -> 0     */
+          if( c->sp >= 1 )
+          { double a = c->stack[c->sp - 1];
+            if( a <= 0.0 )
+              c->stack[c->sp - 1] = 0.0;
+            else
+            { /* Newton-Raphson; avoids pulling in libm.                    */
+              double y = a * 0.5 + 0.5;
+              int it;
+              for( it = 0; it < 16; it++ ) y = 0.5 * (y + a / y);
+              c->stack[c->sp - 1] = y;
+            }
+          }
+          break;
+        case 33: /* setcurrentpoint -- Type 1 op, ignored in Type 2          */
         default:
+          /* Reserved or unknown escape op: clear stack defensively.         */
           c->sp = 0;
           break;
       }
@@ -2780,7 +2806,9 @@ static int svg_glyph_run_cff_body(svg_glyph_emit_ctx *c, svg_glyph_font *f,
         break;
       }
       default:
-        /* Unknown -- clear stack and continue defensively.                  */
+        /* Reserved Type 2 one-byte ops (0, 2, 9, 13, 15-17, 28, 32) and    */
+        /* anything else: clear stack and continue defensively.  None of   */
+        /* the corpus Lout emits exercises these.                            */
         c->sp = 0;
         break;
     }
@@ -3152,7 +3180,16 @@ static unsigned long *svg_glyph_parse_loca(const unsigned char *buf,
 #define SVG_TTF_FLG_XSAMEPOS  0x10
 #define SVG_TTF_FLG_YSAMEPOS  0x20
 
-/* glyf composite flags.                                                     */
+/* glyf composite flags.  We honour the geometry-bearing flags (ARG_WORDS, */
+/* ARGS_XY, HAVE_SCALE, HAVE_XY_SC, HAVE_TWO_X_2, MORE_COMPS).  The         */
+/* renderer is unhinted, so WE_HAVE_INSTRUCTIONS (0x0100) is parsed only    */
+/* to know we've finished components -- the trailing instruction stream     */
+/* sits after the last component and we never read past it.                 */
+/* OVERLAP_COMPOUND (0x0400) is a hint to fill-rule consumers; SVG's        */
+/* default non-zero fill behaves correctly so we ignore it.                 */
+/* USE_MY_METRICS / SCALED_COMPONENT_OFFSET / UNSCALED_COMPONENT_OFFSET     */
+/* affect advance-width and translation-scaling subtleties not exercised    */
+/* by the Lout corpus; we treat them as no-ops.                             */
 #define SVG_TTF_CF_ARG_WORDS    0x0001
 #define SVG_TTF_CF_ARGS_XY      0x0002
 #define SVG_TTF_CF_HAVE_SCALE   0x0008
@@ -3160,6 +3197,7 @@ static unsigned long *svg_glyph_parse_loca(const unsigned char *buf,
 #define SVG_TTF_CF_HAVE_XY_SC   0x0040
 #define SVG_TTF_CF_HAVE_TWO_X_2 0x0080
 #define SVG_TTF_CF_INSTR        0x0100
+#define SVG_TTF_CF_OVERLAP      0x0400
 
 /* The path-emission transform is a 2x2 matrix [a b; c d] + translation     */
 /* (tx, ty), applied as (x', y') = (a*x + c*y + tx, b*x + d*y + ty).        */
@@ -3218,7 +3256,12 @@ static int svg_glyph_run_ttf(struct svg_glyph_emit_ctx *c_arg,
     g_start = glyf_off_p[gid];
     g_end   = glyf_off_p[gid + 1];
   }
-  if( g_end <= g_start ) return 1;     /* empty glyph -- legitimate         */
+  /* Two flavours of "empty" glyph that we must handle without erroring:    */
+  /*   (a) zero-length glyf entry (loca[gid] == loca[gid+1]) -- common for  */
+  /*       .notdef-equivalent or unmapped slots; emit nothing.              */
+  /*   (b) a present 10-byte glyf header with numberOfContours == 0 --      */
+  /*       handled in svg_glyph_emit_simple (see early return below).       */
+  if( g_end <= g_start ) return 1;     /* case (a)                          */
   if( (size_t) g_end > f->glyf_len ) return 0;
   gd_len = (size_t) (g_end - g_start);
   if( gd_len < 10 ) return 0;
@@ -3511,7 +3554,6 @@ static int svg_glyph_emit_composite(svg_glyph_emit_ctx *c, svg_glyph_font *f,
   size_t pos = 10;       /* skip header                                     */
   unsigned int flags;
   int more = 1;
-  int last_had_instr = 0;
   while( more )
   {
     unsigned int sub_gid;
@@ -3596,12 +3638,13 @@ static int svg_glyph_emit_composite(svg_glyph_emit_ctx *c, svg_glyph_font *f,
         }
       }
     }
-    last_had_instr = (flags & SVG_TTF_CF_INSTR) ? 1 : 0;
+    /* WE_HAVE_INSTRUCTIONS (0x0100): the spec puts u16 instructionLength + */
+    /* instructions[] after the last component.  Since we exit the loop    */
+    /* immediately when MORE_COMPONENTS is clear, we never read those      */
+    /* trailing bytes -- the unhinted renderer correctly ignores them.     */
+    /* OVERLAP_COMPOUND (0x0400): hint for fill-rule consumers; ignored.   */
     more = (flags & SVG_TTF_CF_MORE_COMPS) ? 1 : 0;
   }
-  /* If the composite carries hinting instructions, they follow the last    */
-  /* component (u16 instructionLength + instructions[]).  We skip them.    */
-  (void) last_had_instr;
   return 1;
 }
 
