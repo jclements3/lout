@@ -790,50 +790,125 @@ static void svg_emit_xml_escaped(const FULL_CHAR *s)
 
 /*****************************************************************************/
 /*                                                                           */
-/*  static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x)    */
+/*  static unsigned int svg_byte_to_codepoint(MAP_VEC mv, unsigned int c)    */
+/*                                                                           */
+/*  Helper: map one input byte to a Unicode codepoint through mv, falling    */
+/*  back to direct Latin-1 -> UTF-8 when the byte has no glyph-name entry    */
+/*  in mv or mv is NULL.                                                     */
+/*                                                                           */
+/*****************************************************************************/
+
+static unsigned int svg_byte_to_codepoint(MAP_VEC mv, unsigned int c)
+{
+  unsigned int cp;
+  OBJECT name_obj;
+  FULL_CHAR *gname;
+
+  cp = 0;
+  if( mv != NULL )
+  {
+    name_obj = mv->vector[c];
+    if( name_obj != NULL && is_word(type(name_obj)) )
+    {
+      gname = string(name_obj);
+      if( gname != NULL )
+        cp = svg_glyph_to_unicode((const char *) gname);
+    }
+  }
+  if( cp == 0 )
+    cp = c;       /* fallback: Latin-1 -> UTF-8 */
+  return cp;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,    */
+/*                                 double size_pt)                           */
 /*                                                                           */
 /*  Emit the text of a word by mapping each byte through the font's LCM     */
 /*  vector to a glyph name, then to Unicode.  Falls back to direct          */
 /*  Latin-1 -> UTF-8 if no mapping exists.                                  */
 /*                                                                           */
+/*  When the font's AFM kern table has an entry for an adjacent pair of     */
+/*  glyphs, the second glyph is wrapped in a <tspan dx="..."> so the SVG    */
+/*  consumer matches the spacing PostScript would have achieved via the    */
+/*  font's `show` operator.  FontKernLength returns the kern value in Lout  */
+/*  internal units, already scaled to the current font size, with the same  */
+/*  sign convention SVG dx uses: negative tightens, positive loosens.  So   */
+/*  the dx emitted is simply ksize / PT.                                    */
+/*                                                                           */
+/*  Kerning is suppressed when:                                              */
+/*    - size_pt < 6  (sub-resolution spacing not worth the byte cost)        */
+/*    - no LCM mapping is active (no unacc_map available for FontKernLength */
+/*      and Symbol/Dingbats fonts ship without useful kern tables anyway)    */
+/*    - the font has no kern table (kern_sizes == NULL)                     */
+/*                                                                           */
 /*****************************************************************************/
 
-static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x)
+static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
+  double size_pt)
 {
   MAPPING m;
   MAP_VEC mv;
+  FULL_CHAR *unacc;
   const FULL_CHAR *p;
   unsigned int c, cp;
-  OBJECT name_obj;
-  FULL_CHAR *gname;
+  BOOLEAN do_kern;
+  FULL_LENGTH ksize;
+  double dx_pt;
 
   if( s == NULL )
     return;
 
   mv = NULL;
+  unacc = NULL;
+  do_kern = FALSE;
   m = FontMapping(fnum, &fpos(x));
   if( m != 0 && MapTable != NULL && MapTable[m] != NULL )
+  {
     mv = MapTable[m];
+    unacc = MapTable[m]->map[MAP_UNACCENTED];
+    if( unacc != NULL && size_pt >= 6.0 &&
+        finfo[fnum].kern_sizes != (FULL_LENGTH *) NULL )
+      do_kern = TRUE;
+  }
 
+  if( !do_kern )
+  {
+    /* fast path: no kerning, just emit codepoints */
+    for( p = s; *p != '\0'; p++ )
+    {
+      cp = svg_byte_to_codepoint(mv, (unsigned int) *p);
+      svg_emit_utf8(cp);
+    }
+    return;
+  }
+
+  /* slow path: emit a <tspan dx="..."> at every kern point */
   for( p = s; *p != '\0'; p++ )
   {
     c = (unsigned int) *p;
-    cp = 0;
-    if( mv != NULL )
+    if( p != s )
     {
-      name_obj = mv->vector[c];
-      if( name_obj != NULL && is_word(type(name_obj)) )
+      ksize = FontKernLength(fnum, unacc, (FULL_CHAR) *(p-1), (FULL_CHAR) *p);
+      if( ksize != 0 )
       {
-        gname = string(name_obj);
-        if( gname != NULL )
-          cp = svg_glyph_to_unicode((const char *) gname);
+        /* ksize is the AFM kern value scaled to the current font size, in   */
+        /* Lout internal units (PT = 20 units/pt).  The same value is added  */
+        /* to fwd(x, COLM) in FontWordSize, so a negative ksize tightens the */
+        /* pair (e.g. KPX A V -135 in Times) and a positive value loosens.   */
+        /* SVG tspan dx follows the same sign convention -- positive dx     */
+        /* widens, negative tightens -- so emit ksize/PT directly.           */
+        dx_pt = ((double) ksize) / PT;
+        fprintf(out_fp, "<tspan dx=\"%.4f\">", dx_pt);
+        cp = svg_byte_to_codepoint(mv, c);
+        svg_emit_utf8(cp);
+        fputs("</tspan>", out_fp);
+        continue;
       }
     }
-    if( cp == 0 )
-    {
-      /* fallback: Latin-1 -> UTF-8 */
-      cp = c;
-    }
+    cp = svg_byte_to_codepoint(mv, c);
     svg_emit_utf8(cp);
   }
 }
@@ -966,7 +1041,7 @@ static void SVG_PrintWord(OBJECT x, int hpos, int vpos)
   if( colour_str != NULL )
     fprintf(out_fp, " fill=\"%s\"", colour_str);
   fputc('>', out_fp);
-  svg_emit_word_text(fnum, string(x), x);
+  svg_emit_word_text(fnum, string(x), x, size_pt);
   fputs("</text></g>\n", out_fp);
 }
 
