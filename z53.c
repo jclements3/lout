@@ -224,6 +224,11 @@ static unsigned int svg_name_hash(const char *s);
 /* back document builds inside the same process.                             */
 static void svg_face_cache_clear(void);
 
+/* Forward decl: per-document fi/fl ligature allowlist cache (defined         */
+/* alongside svg_emit_word_text); reset in SVG_PrintInitialize for the same   */
+/* reason as the face cache.                                                  */
+static void svg_lig_cache_clear(void);
+
 /* Forward decl: monotonic counter for <path id="textpath-N"> defs emitted   */
 /* by the textPath emitter.  Defined alongside g_psstate further down; the  */
 /* declaration is hoisted here so SVG_PrintInitialize can reset it.          */
@@ -276,6 +281,7 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
   /* document, mirroring PostScript's own state.                            */
   svg_psinterp_init();
   svg_face_cache_clear();
+  svg_lig_cache_clear();
   /* Reset the textPath def-id counter so two consecutive document builds  */
   /* in the same process produce identical SVG output.                     */
   svg_textpath_id_next = 0;
@@ -1046,6 +1052,134 @@ static unsigned int svg_byte_to_codepoint(MAP_VEC mv, unsigned int c)
 
 /*****************************************************************************/
 /*                                                                           */
+/*  static BOOLEAN svg_font_has_ligatures(FONT_NUM fnum)                     */
+/*                                                                           */
+/*  Return TRUE if fnum is in the allowlist of serif body-text faces whose   */
+/*  AFM ships the fi/fl/ffi/ffl glyphs (and whose PFB outlines, on the URW   */
+/*  base35 substitution used by Ghostscript and most desktop browsers, do    */
+/*  the same).  Decision is keyed off FontFamily(): the Lout family name,    */
+/*  e.g. "Times", "Palatino", "Bookman", "Schoolbook", "Chancery".  Monospace */
+/*  ("Courier") and sans-serif ("Helvetica", "AvantGarde") families are      */
+/*  excluded; so are Symbol/Dingbats/BarCode which have no Latin alphabet.   */
+/*                                                                           */
+/*  Result cached per-fnum in a 64-entry hash (linear probing) to amortise   */
+/*  the family-string comparison across the ~99k words/document budget.     */
+/*                                                                           */
+/*****************************************************************************/
+
+#define SVG_LIG_CACHE_SIZE 64
+#define SVG_LIG_CACHE_MASK (SVG_LIG_CACHE_SIZE - 1)
+struct svg_lig_cache_entry {
+  FONT_NUM fnum;        /* 0 means unused                                    */
+  BOOLEAN  has_lig;
+};
+static struct svg_lig_cache_entry svg_lig_cache[SVG_LIG_CACHE_SIZE];
+
+static BOOLEAN svg_font_has_ligatures(FONT_NUM fnum)
+{
+  unsigned int slot, probes;
+  struct svg_lig_cache_entry *e;
+  FULL_CHAR *fname;
+  const char *fam;
+  BOOLEAN has;
+
+  if( fnum == 0 )
+    return FALSE;
+  slot = (unsigned int) fnum & (unsigned int) SVG_LIG_CACHE_MASK;
+  for( probes = 0; probes < SVG_LIG_CACHE_SIZE; probes++ )
+  {
+    e = &svg_lig_cache[slot];
+    if( e->fnum == fnum )
+      return e->has_lig;
+    if( e->fnum == 0 )
+      break;
+    slot = (slot + 1) & (unsigned int) SVG_LIG_CACHE_MASK;
+  }
+
+  fname = FontFamily(fnum);
+  fam   = fname == NULL ? "" : (const char *) fname;
+  has   = FALSE;
+  /* AT (Adobe Type) serif body-text families known to carry fi/fl/ffi/ffl.  */
+  /* The standard PS-13 set in fontdefs.ld uses bare family names; URW PFB  */
+  /* fallbacks (NimbusRomNo9L, URWPalladioL) substitute glyph-compatible    */
+  /* outlines with the same four ligature glyphs.  ITC and Garamond match    */
+  /* via prefix in case downstream font.def edits add them.                  */
+  if(      strcmp(fam, "Times")      == 0 ) has = TRUE;
+  else if( strcmp(fam, "Palatino")   == 0 ) has = TRUE;
+  else if( strcmp(fam, "Bookman")    == 0 ) has = TRUE;
+  else if( strcmp(fam, "Schoolbook") == 0 ) has = TRUE;
+  else if( strcmp(fam, "Chancery")   == 0 ) has = TRUE;
+  else if( strcmp(fam, "Garamond")   == 0 ) has = TRUE;
+  else if( strncmp(fam, "ITC",           3) == 0 ) has = TRUE;
+  else if( strncmp(fam, "NimbusRomNo9L", 13) == 0 ) has = TRUE;
+  else if( strncmp(fam, "URWPalladio",   11) == 0 ) has = TRUE;
+
+  if( probes < SVG_LIG_CACHE_SIZE )
+  {
+    e->fnum    = fnum;
+    e->has_lig = has;
+  }
+  return has;
+}
+
+static void svg_lig_cache_clear(void)
+{
+  int i;
+  for( i = 0; i < SVG_LIG_CACHE_SIZE; i++ )
+  {
+    svg_lig_cache[i].fnum    = 0;
+    svg_lig_cache[i].has_lig = FALSE;
+  }
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  static unsigned int svg_match_ligature(const FULL_CHAR *p, int *consumed) */
+/*                                                                           */
+/*  Look at the next 1-3 bytes of p and return a ligature codepoint if a    */
+/*  digram/trigram is recognised, plus the byte count consumed in *consumed. */
+/*  Returns 0 (no match) and *consumed = 1 otherwise.  Caller is responsible */
+/*  for gating on svg_font_has_ligatures().                                  */
+/*                                                                           */
+/*  Order of probes matters: trigrams before digrams so "ffi" beats "fi".    */
+/*                                                                           */
+/*****************************************************************************/
+
+static unsigned int svg_match_ligature(const FULL_CHAR *p, int *consumed)
+{
+  unsigned char c0, c1, c2;
+  c0 = (unsigned char) p[0];
+  if( c0 != 'f' )
+  {
+    *consumed = 1;
+    return 0;
+  }
+  c1 = (unsigned char) p[1];
+  if( c1 == '\0' )
+  {
+    *consumed = 1;
+    return 0;
+  }
+  if( c1 == 'f' )
+  {
+    c2 = (unsigned char) p[2];
+    if( c2 == 'i' ) { *consumed = 3; return 0xFB03; }   /* ffi */
+    if( c2 == 'l' ) { *consumed = 3; return 0xFB04; }   /* ffl */
+    /* "ff" alone -- no U+FB00 substitution to keep the change minimal     */
+    /* and avoid touching kern-pair tables that key on the literal 'f'.    */
+    *consumed = 1;
+    return 0;
+  }
+  if( c1 == 'i' ) { *consumed = 2; return 0xFB01; }     /* fi  */
+  if( c1 == 'l' ) { *consumed = 2; return 0xFB02; }     /* fl  */
+  *consumed = 1;
+  return 0;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,    */
 /*                                 double size_pt)                           */
 /*                                                                           */
@@ -1067,6 +1201,15 @@ static unsigned int svg_byte_to_codepoint(MAP_VEC mv, unsigned int c)
 /*      and Symbol/Dingbats fonts ship without useful kern tables anyway)    */
 /*    - the font has no kern table (kern_sizes == NULL)                     */
 /*                                                                           */
+/*  Ligature substitution: when the active font is in the AT allowlist of    */
+/*  serif families that carry fi/fl/ffi/ffl in their AFM (and the URW base35 */
+/*  PFB outlines used by Ghostscript and most desktop browsers as fallback  */
+/*  for the standard PS-13 Type 1 set ship the same four glyphs), digrams    */
+/*  "fi"/"fl"/"ffi"/"ffl" are rewritten to U+FB01..U+FB04 before emission.  */
+/*  Kerning continuity across a ligature uses the last consumed letter      */
+/*  ('i' or 'l') as the left member of the next kern pair -- the same       */
+/*  spacing PostScript would have computed against the digram's right edge. */
+/*                                                                           */
 /*****************************************************************************/
 
 static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
@@ -1077,9 +1220,12 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
   FULL_CHAR *unacc;
   const FULL_CHAR *p;
   unsigned int c, cp;
-  BOOLEAN do_kern;
+  BOOLEAN do_kern, do_lig;
   FULL_LENGTH ksize;
   double dx_pt;
+  int step;
+  unsigned int lig_cp;
+  FULL_CHAR prev_byte;
 
   if( s == NULL )
     return;
@@ -1096,25 +1242,60 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
         finfo[fnum].kern_sizes != (FULL_LENGTH *) NULL )
       do_kern = TRUE;
   }
+  do_lig = svg_font_has_ligatures(fnum);
 
   if( !do_kern )
   {
-    /* fast path: no kerning, just emit codepoints */
-    for( p = s; *p != '\0'; p++ )
+    /* fast path: no kerning, just emit codepoints, with optional ligature  */
+    /* fold for AT serif families.                                          */
+    p = s;
+    while( *p != '\0' )
     {
-      cp = svg_byte_to_codepoint(mv, (unsigned int) *p);
-      svg_emit_utf8(cp);
+      step = 1;
+      lig_cp = 0;
+      if( do_lig )
+        lig_cp = svg_match_ligature(p, &step);
+      if( lig_cp != 0 )
+      {
+        svg_emit_utf8(lig_cp);
+      }
+      else
+      {
+        cp = svg_byte_to_codepoint(mv, (unsigned int) *p);
+        svg_emit_utf8(cp);
+      }
+      p += step;
     }
     return;
   }
 
-  /* slow path: emit a <tspan dx="..."> at every kern point */
-  for( p = s; *p != '\0'; p++ )
+  /* slow path: emit a <tspan dx="..."> at every kern point.  prev_byte      */
+  /* tracks the right-edge byte of the last emitted glyph (literal byte for  */
+  /* non-ligated emits, the trailing 'i'/'l' for a fi/fl/ffi/ffl run) so    */
+  /* the next FontKernLength probe sees the AFM-correct left member.        */
+  p = s;
+  prev_byte = (FULL_CHAR) 0;
+  while( *p != '\0' )
   {
-    c = (unsigned int) *p;
-    if( p != s )
+    step = 1;
+    lig_cp = 0;
+    if( do_lig )
+      lig_cp = svg_match_ligature(p, &step);
+    if( lig_cp != 0 )
     {
-      ksize = FontKernLength(fnum, unacc, (FULL_CHAR) *(p-1), (FULL_CHAR) *p);
+      /* Ligature run: emit the ligature codepoint.  Skip the kern probe    */
+      /* for the leading 'f' (the digram glyph already has the proper       */
+      /* internal letter spacing baked in) and resume kerning from the      */
+      /* trailing letter for the next pair.                                  */
+      svg_emit_utf8(lig_cp);
+      prev_byte = (FULL_CHAR) p[step - 1];
+      p += step;
+      continue;
+    }
+    c = (unsigned int) *p;
+    if( p != s && prev_byte != (FULL_CHAR) 0 )
+    {
+      ksize = FontKernLength(fnum, unacc, prev_byte, (FULL_CHAR) *p);
       if( ksize != 0 )
       {
         /* ksize is the AFM kern value scaled to the current font size, in   */
@@ -1128,11 +1309,15 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
         cp = svg_byte_to_codepoint(mv, c);
         svg_emit_utf8(cp);
         fputs("</tspan>", out_fp);
+        prev_byte = (FULL_CHAR) *p;
+        p++;
         continue;
       }
     }
     cp = svg_byte_to_codepoint(mv, c);
     svg_emit_utf8(cp);
+    prev_byte = (FULL_CHAR) *p;
+    p++;
   }
 }
 
