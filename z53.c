@@ -229,6 +229,13 @@ static void svg_face_cache_clear(void);
 /* reason as the face cache.                                                  */
 static void svg_lig_cache_clear(void);
 
+/* Forward decls: per-font 256x256 kern-pair precompute (defined alongside    */
+/* svg_emit_word_text).  svg_kern_tables_clear() releases all allocated 128KB */
+/* tables; called from SVG_PrintInitialize (start-of-doc reset) and           */
+/* SVG_PrintAfterLastPage (end-of-doc free).                                  */
+static void svg_kern_tables_clear(void);
+static short *svg_kern_table_for(FONT_NUM fnum, FULL_CHAR *unacc_map);
+
 /* Forward decl: monotonic counter for <path id="textpath-N"> defs emitted   */
 /* by the textPath emitter.  Defined alongside g_psstate further down; the  */
 /* declaration is hoisted here so SVG_PrintInitialize can reset it.          */
@@ -282,6 +289,7 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
   svg_psinterp_init();
   svg_face_cache_clear();
   svg_lig_cache_clear();
+  svg_kern_tables_clear();
   /* Reset the textPath def-id counter so two consecutive document builds  */
   /* in the same process produce identical SVG output.                     */
   svg_textpath_id_next = 0;
@@ -1135,6 +1143,130 @@ static void svg_lig_cache_clear(void)
 
 /*****************************************************************************/
 /*                                                                           */
+/*  Per-font 256x256 kern-pair precompute.                                   */
+/*                                                                           */
+/*  The hot kerning probe inside svg_emit_word_text was calling              */
+/*  FontKernLength() once per inter-glyph gap.  FontKernLength's body (in    */
+/*  z37.c) walks finfo[fnum].kern_chars linearly from the index pulled out   */
+/*  of finfo[fnum].kern_table[first_char], with a fallback to the unaccented */
+/*  form -- O(K) per call where K is the run-length of pairs sharing that    */
+/*  first char.  On the User's Guide that's ~99k word emits * ~average word  */
+/*  length, so the linear scan is a measurable slice of svg_emit_word_text.  */
+/*                                                                           */
+/*  Precompute, on first kerning call for a given fnum, the full 256*256     */
+/*  matrix of kern values (resolved through unacc_map so the fallback path   */
+/*  is folded into the table).  Stored as `short` (FULL_LENGTH = int in      */
+/*  Lout, but kern values scaled to font size never exceed +/- a few hundred */
+/*  internal units even at 1000pt, so int16 is comfortable).  Memory cost:   */
+/*  256 * 256 * 2 = 128 KB per font.  For a typical document (10-15 sized    */
+/*  faces) that's 1-2 MB, which is fine for a server-side rendering tool.    */
+/*                                                                           */
+/*  svg_kern_tables[] is a dynamically grown array indexed by FONT_NUM.      */
+/*  Capacity is doubled on demand to mirror finfo's growth pattern in z37.c. */
+/*  A NULL slot means "not yet built for this fnum"; an explicit sentinel    */
+/*  ((short *) 1) means "FontKernLength would always return 0 for this fnum, */
+/*  no table needed" (e.g. fonts with no kern_sizes); any other pointer is   */
+/*  a heap-allocated 65536-entry short array indexed by left*256 + right.    */
+/*                                                                           */
+/*****************************************************************************/
+
+#define SVG_KERN_NO_TABLE ((short *) 1)
+
+static short      **svg_kern_tables       = (short **) NULL;
+static FONT_NUM     svg_kern_tables_size  = 0;
+
+static void svg_kern_tables_clear(void)
+{
+  FONT_NUM i;
+  if( svg_kern_tables == (short **) NULL )
+    return;
+  for( i = 0; i < svg_kern_tables_size; i++ )
+  {
+    if( svg_kern_tables[i] != (short *) NULL &&
+        svg_kern_tables[i] != SVG_KERN_NO_TABLE )
+      free(svg_kern_tables[i]);
+    svg_kern_tables[i] = (short *) NULL;
+  }
+  free(svg_kern_tables);
+  svg_kern_tables      = (short **) NULL;
+  svg_kern_tables_size = 0;
+}
+
+/* Grow svg_kern_tables to at least new_size slots, doubling from a base of  */
+/* 16.  Returns TRUE on success, FALSE on OOM (caller falls back to direct   */
+/* FontKernLength).                                                           */
+static BOOLEAN svg_kern_tables_grow(FONT_NUM new_size)
+{
+  FONT_NUM new_cap, i;
+  short **new_tab;
+  if( new_size <= svg_kern_tables_size )
+    return TRUE;
+  new_cap = svg_kern_tables_size > 0 ? svg_kern_tables_size : 16;
+  while( new_cap < new_size )
+    new_cap *= 2;
+  new_tab = (short **) realloc(svg_kern_tables, new_cap * sizeof(short *));
+  if( new_tab == (short **) NULL )
+    return FALSE;
+  for( i = svg_kern_tables_size; i < new_cap; i++ )
+    new_tab[i] = (short *) NULL;
+  svg_kern_tables      = new_tab;
+  svg_kern_tables_size = new_cap;
+  return TRUE;
+}
+
+/* Build and cache the 256x256 kern table for fnum.  Returns the table       */
+/* pointer, or SVG_KERN_NO_TABLE if the font has no kern data, or NULL on    */
+/* allocation failure (caller must fall back to FontKernLength).             */
+static short *svg_kern_table_for(FONT_NUM fnum, FULL_CHAR *unacc_map)
+{
+  short *tab;
+  int a, b;
+  FULL_LENGTH v;
+
+  if( !svg_kern_tables_grow((FONT_NUM) (fnum + 1)) )
+    return (short *) NULL;
+  tab = svg_kern_tables[fnum];
+  if( tab != (short *) NULL )
+    return tab;
+
+  /* Nothing to precompute if the font has no AFM kern data at all. */
+  if( finfo[fnum].kern_sizes == (FULL_LENGTH *) NULL ||
+      finfo[fnum].kern_table == (unsigned short *) NULL ||
+      finfo[fnum].kern_chars == (FULL_CHAR *) NULL ||
+      finfo[fnum].kern_value == (unsigned char *) NULL )
+  {
+    svg_kern_tables[fnum] = SVG_KERN_NO_TABLE;
+    return SVG_KERN_NO_TABLE;
+  }
+
+  tab = (short *) malloc(256 * 256 * sizeof(short));
+  if( tab == (short *) NULL )
+    return (short *) NULL;
+
+  /* Walk all 256*256 (left, right) Latin-1 pairs once, calling              */
+  /* FontKernLength so the unacc_map fallback path is folded into the cache. */
+  /* This is 65536 calls at first-use time, each O(K) -- a one-shot up-front */
+  /* cost paid back many times over by the O(1) lookups in the hot path.    */
+  for( a = 0; a < 256; a++ )
+  {
+    for( b = 0; b < 256; b++ )
+    {
+      v = FontKernLength(fnum, unacc_map,
+            (FULL_CHAR) a, (FULL_CHAR) b);
+      /* Clamp into int16 range.  Real-world scaled kern values are            */
+      /* +/- a few thousand internal units at most; the clamp is defensive.   */
+      if( v > 32767 )       v = 32767;
+      else if( v < -32768 ) v = -32768;
+      tab[a * 256 + b] = (short) v;
+    }
+  }
+  svg_kern_tables[fnum] = tab;
+  return tab;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  static unsigned int svg_match_ligature(const FULL_CHAR *p, int *consumed) */
 /*                                                                           */
 /*  Look at the next 1-3 bytes of p and return a ligature codepoint if a    */
@@ -1226,6 +1358,7 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
   int step;
   unsigned int lig_cp;
   FULL_CHAR prev_byte;
+  short *ktab;
 
   if( s == NULL )
     return;
@@ -1233,6 +1366,7 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
   mv = NULL;
   unacc = NULL;
   do_kern = FALSE;
+  ktab = (short *) NULL;
   m = FontMapping(fnum, &fpos(x));
   if( m != 0 && MapTable != NULL && MapTable[m] != NULL )
   {
@@ -1240,7 +1374,16 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
     unacc = MapTable[m]->map[MAP_UNACCENTED];
     if( unacc != NULL && size_pt >= 6.0 &&
         finfo[fnum].kern_sizes != (FULL_LENGTH *) NULL )
-      do_kern = TRUE;
+    {
+      /* Resolve to a 256x256 precomputed table.  The first call for a given  */
+      /* fnum populates the table by walking all Latin-1 pairs through        */
+      /* FontKernLength (fallback-via-unacc_map semantics included); later    */
+      /* calls are an O(1) array lookup.  If allocation fails or the font is  */
+      /* the sentinel "no kern data", fall through to the no-kern fast path.  */
+      ktab = svg_kern_table_for(fnum, unacc);
+      if( ktab != (short *) NULL && ktab != SVG_KERN_NO_TABLE )
+        do_kern = TRUE;
+    }
   }
   do_lig = svg_font_has_ligatures(fnum);
 
@@ -1295,7 +1438,11 @@ static void svg_emit_word_text(FONT_NUM fnum, FULL_CHAR *s, OBJECT x,
     c = (unsigned int) *p;
     if( p != s && prev_byte != (FULL_CHAR) 0 )
     {
-      ksize = FontKernLength(fnum, unacc, prev_byte, (FULL_CHAR) *p);
+      /* O(1) precomputed lookup -- replaces FontKernLength(fnum, unacc,     */
+      /* prev_byte, *p).  Equivalent values because svg_kern_table_for() ran */
+      /* FontKernLength for every (a,b) when building the table.            */
+      ksize = (FULL_LENGTH) ktab[(unsigned int) prev_byte * 256 +
+                                 (unsigned int) (FULL_CHAR) *p];
       if( ksize != 0 )
       {
         /* ksize is the AFM kern value scaled to the current font size, in   */
@@ -1373,6 +1520,11 @@ static void SVG_PrintAfterLastPage(void)
 {
   svg_close_page();
   svg_psinterp_shutdown();
+  /* Release the 128 KB/font kern precompute tables built by                */
+  /* svg_kern_table_for().  Subsequent in-process builds (under --serve or  */
+  /* test harness) call SVG_PrintInitialize, which also clears, so this is  */
+  /* a belt-and-braces free for the final document only.                   */
+  svg_kern_tables_clear();
   /* Flush the 128 KB out_fp buffer set in SVG_PrintInitialize so the file  */
   /* is fully committed before Lout proper exits (some callers rely on the */
   /* file being readable immediately after lout returns).                  */
