@@ -114,6 +114,33 @@ def @ABC right @Body
 
 ###########################################################################
 #                                                                         #
+#   @Mermaid { MERMAID-SOURCE }                                           #
+#                                                                         #
+#   In SVG mode: emits                                                    #
+#       <foreignObject><div class="mermaid">MERMAID-SOURCE</div>          #
+#       </foreignObject>                                                  #
+#   so that a downstream JS layer (mermaid.js) can render the diagram.    #
+#   In any other back-end: emits a placeholder note.                      #
+#                                                                         #
+###########################################################################
+
+def @Mermaid right @Body
+{
+    @BackEnd @Case {
+        SVG @Yield {
+            { "<foreignObject><div class=" "\"" "mermaid" "\"" ">"
+              @Body
+              "</div></foreignObject>" } @Graphic {}
+        }
+        else @Yield {
+            "[Mermaid diagram omitted in non-SVG back-end]"
+        }
+    }
+}
+
+
+###########################################################################
+#                                                                         #
 #   @SVG { SVG-MARKUP }                                                   #
 #                                                                         #
 #   In SVG mode: emits the body verbatim.  The body is assumed to be      #
