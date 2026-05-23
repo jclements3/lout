@@ -132,17 +132,37 @@ vhcurveto / hvcurveto / hhcurveto / vvcurveto / rcurveline /
 rlinecurve), biased subroutine calls (callsubr / callgsubr with
 107 / 1131 / 32768 bias), the flex family (hflex / flex / hflex1 /
 flex1 expanded to two rrcurveto's), and the implicit width-delta
-operand handling.  TrueType `.ttf` (`glyf` table) is still out of
-scope and falls through to the bbox rectangle.
+operand handling.
+
+Update 2026-05-22 (later): TrueType `.ttf` (`glyf` table) support
+landed alongside.  Detection branches on the sfnt magic
+(`0x00010000` / `'true'` / `'typ1'`).  The loader walks the same OT
+table directory used by the CFF path, locates `head` (UnitsPerEm,
+indexToLocFormat), `maxp` (numGlyphs), `cmap` (format 4 BMP + format
+12 supplementary, ordered Unicode-platform > Windows-Unicode),
+`loca` (short or long indexed by the head bit), and `glyf` (cached
+into the per-font arena by offset, not pointer, since the arena
+realloc can move the backing buffer mid-load).  At emit time the
+selected glyph's record is parsed: simple outlines walk the flag /
+x / y delta streams with repeat-byte expansion, implicit on-curve
+midpoints between two off-curve points, and quadratic Beziers
+converted to cubics via the standard P0 + 2/3(Q-P0), P2 + 2/3(Q-P2)
+formula.  Composites recurse with a 2x2 affine matrix (scale,
+xy-scale, and two-by-two forms decoded; translation via
+ARGS_ARE_XY_VALUES; depth cap 8).  Aliases for the DejaVu /
+Liberation / Noto families live in `svg_glyph_ttf_map`; an
+environment override `LOUT_TTF_FONT_DIR` (and `LOUT_T1_FONT_DIR` as a
+shared convenience override) prepends a search dir.
 
 Out-of-scope follow-ups (left for a future round):
-  - TrueType `glyf` outline parsing for `.ttf` fonts (DejaVu,
-    Liberation, Noto).  Many system fonts ship as TTF rather than
-    CFF-based OTF; today they fall back to the bbox.  Phase 2.
   - Honouring the active LCM for non-Latin1 character encodings
     inside `charpath` (the operand is whatever bytes the PS source
     pushed, with no FONT_NUM in scope; we use Adobe
     StandardEncoding glyph names as a coarse approximation).
+  - TrueType hinting / variation fonts (`fvar`/`gvar`).  Outlines
+    are emitted unhinted; variation axes are not honoured.
+  - TrueType collection (`.ttc`) wrappers.  We only accept top-
+    level sfnt files; embedded TTCs fall through to the bbox.
 
 Touches: `z53.c` + new `z53_glyph.c` + `makefile`.  No
 `include/` changes; the PostScript back end (`z49.c`) is

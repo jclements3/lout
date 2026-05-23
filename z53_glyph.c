@@ -9,10 +9,10 @@
 /*  any later version.                                                       */
 /*                                                                           */
 /*  FILE:         z53_glyph.c                                                */
-/*  MODULE:       SVG Back End / Type 1 + CFF Glyph Outline Service          */
+/*  MODULE:       SVG Back End / Type 1 + CFF + TrueType Glyph Service       */
 /*  EXTERNS:      svg_glyph_emit_outline                                     */
 /*                                                                           */
-/*  STATUS:       Two outline back ends behind one cache:                    */
+/*  STATUS:       Three outline back ends behind one cache:                  */
 /*                                                                           */
 /*                (a) Adobe Type 1 .pfb (URW++ / Ghostscript base-35 set).   */
 /*                    PFB segment unwrap -> eexec decryption (key 55665,    */
@@ -28,11 +28,20 @@
 /*                    biased local + global Subrs and the hflex / flex /   */
 /*                    hflex1 / flex1 family.                               */
 /*                                                                           */
-/*                Both share the same arena allocator, cache record, and    */
-/*                public entry point (svg_glyph_emit_outline).               */
+/*                (c) TrueType .ttf (sfnt magic 0x00010000).  OT table     */
+/*                    directory walk -> head (UnitsPerEm, loca format) +   */
+/*                    maxp (numGlyphs) + cmap (format 4 + optional 12)     */
+/*                    + loca + glyf.  Per-glyph glyf record decoded on     */
+/*                    demand: simple outlines (contours of on-/off-curve   */
+/*                    points) emitted as quadratic Beziers converted to    */
+/*                    cubic via the standard P0 + 2/3(Q-P0), P2 + 2/3(Q-   */
+/*                    P2) formula; composites resolved iteratively with    */
+/*                    a small component stack (translation + optional      */
+/*                    affine 2x2 matrix; scale / xy-scale / two-by-two    */
+/*                    forms honoured).                                     */
 /*                                                                           */
-/*                TrueType `glyf` outlines (.ttf with magic 0x00010000)     */
-/*                are out of scope and fall through to the bbox rectangle. */
+/*                All three share the same arena allocator, cache record,  */
+/*                and public entry point (svg_glyph_emit_outline).          */
 /*                                                                           */
 /*  ANSI C ONLY: must compile with tcc.  No mid-block decls, no // comments, */
 /*  no designated initialisers, no GCC extensions.                           */
@@ -65,6 +74,10 @@
 /* Font kind tag: governs interpreter dispatch.                              */
 #define SVG_GLYPH_KIND_T1   1
 #define SVG_GLYPH_KIND_CFF  2
+#define SVG_GLYPH_KIND_TTF  3
+
+#define SVG_GLYPH_TTF_MAX_GLYPHS  65536    /* hard cap from u16 numGlyphs    */
+#define SVG_GLYPH_TTF_RECURSE     8        /* composite-glyph recursion cap  */
 
 
 /*****************************************************************************/
@@ -99,6 +112,14 @@ typedef struct svg_glyph_font {
   int             gsubr_bias;              /* CFF: bias for global subrs    */
   int             lenIV;                   /* Type 1 only                    */
   double          em_scale;                /* design-units -> 1000-em factor */
+  /* TrueType-only state.  The raw `glyf` table is kept inside the arena    */
+  /* but referenced by *offset* (not pointer) because the arena may be      */
+  /* realloc'd by subsequent allocations -- pointers stored here would      */
+  /* dangle.  Same goes for the (ttf_n_glyphs + 1) loca offsets array.      */
+  size_t          glyf_arena_off;
+  size_t          glyf_len;
+  size_t          glyf_off_arena_off;  /* offset to unsigned long[]         */
+  int             ttf_n_glyphs;
   /* simple arena -- one malloc, grown as needed; freed at process exit (no  */
   /* explicit cleanup hook in this back end).  All cs / subrs pointers       */
   /* point inside arena.                                                     */
@@ -224,6 +245,60 @@ static const char *svg_glyph_otf_dir[] = {
 
 /*****************************************************************************/
 /*                                                                           */
+/*  TrueType .ttf lookup.  Same shape as the OTF lookup: a PS-name -> file   */
+/*  map for hand-curated aliases (DejaVu / Liberation / Noto), plus a list  */
+/*  of system directories walked one level deep.  Both .ttf and .TTF are   */
+/*  accepted by the probe.                                                  */
+/*                                                                           */
+/*  Override via LOUT_TTF_FONT_DIR env var (single dir prepended).          */
+/*                                                                           */
+/*****************************************************************************/
+
+static const svg_glyph_map_entry svg_glyph_ttf_map[] = {
+  /* DejaVu family (Debian/Ubuntu default).  PS names match GhostScript's   */
+  /* DejaVu CIDFontInfo entries.                                             */
+  { "DejaVuSans",                "DejaVuSans.ttf" },
+  { "DejaVuSans-Bold",           "DejaVuSans-Bold.ttf" },
+  { "DejaVuSans-Oblique",        "DejaVuSans-Oblique.ttf" },
+  { "DejaVuSans-BoldOblique",    "DejaVuSans-BoldOblique.ttf" },
+  { "DejaVuSerif",               "DejaVuSerif.ttf" },
+  { "DejaVuSerif-Bold",          "DejaVuSerif-Bold.ttf" },
+  { "DejaVuSerif-Italic",        "DejaVuSerif-Italic.ttf" },
+  { "DejaVuSerif-BoldItalic",    "DejaVuSerif-BoldItalic.ttf" },
+  { "DejaVuSansMono",            "DejaVuSansMono.ttf" },
+  { "DejaVuSansMono-Bold",       "DejaVuSansMono-Bold.ttf" },
+  { "DejaVuSansMono-Oblique",    "DejaVuSansMono-Oblique.ttf" },
+  { "DejaVuSansMono-BoldOblique","DejaVuSansMono-BoldOblique.ttf" },
+  /* Liberation -- metric-compatible with Times / Arial / Courier.          */
+  { "LiberationSerif-Regular",   "LiberationSerif-Regular.ttf" },
+  { "LiberationSerif-Bold",      "LiberationSerif-Bold.ttf" },
+  { "LiberationSerif-Italic",    "LiberationSerif-Italic.ttf" },
+  { "LiberationSerif-BoldItalic","LiberationSerif-BoldItalic.ttf" },
+  { "LiberationSans-Regular",    "LiberationSans-Regular.ttf" },
+  { "LiberationSans-Bold",       "LiberationSans-Bold.ttf" },
+  { "LiberationSans-Italic",     "LiberationSans-Italic.ttf" },
+  { "LiberationSans-BoldItalic", "LiberationSans-BoldItalic.ttf" },
+  { "LiberationMono-Regular",    "LiberationMono-Regular.ttf" },
+  { "LiberationMono-Bold",       "LiberationMono-Bold.ttf" },
+  /* Noto Sans / Serif (most-common Linux distros).                          */
+  { "NotoSans-Regular",          "NotoSans-Regular.ttf" },
+  { "NotoSans-Bold",             "NotoSans-Bold.ttf" },
+  { "NotoSerif-Regular",         "NotoSerif-Regular.ttf" },
+  { "NotoSerif-Bold",            "NotoSerif-Bold.ttf" },
+  { NULL, NULL }
+};
+
+static const char *svg_glyph_ttf_dir[] = {
+  "/usr/share/fonts/truetype/",
+  "/usr/share/fonts/TTF/",
+  "/usr/local/share/fonts/truetype/",
+  "/usr/local/share/fonts/",
+  NULL
+};
+
+
+/*****************************************************************************/
+/*                                                                           */
 /*  Adobe Standard Encoding (subset sufficient for the seac operator, which  */
 /*  references the base / accent glyphs by Adobe Standard Encoding code).    */
 /*  Indices outside this range yield NULL -> the seac glyph emits nothing    */
@@ -311,6 +386,25 @@ static unsigned char *svg_glyph_arena_alloc(svg_glyph_font *f, size_t n)
   p = f->arena + f->arena_used;
   f->arena_used += n;
   return p;
+}
+
+/* Ensure the arena has capacity for at least `n` more bytes without        */
+/* triggering a realloc on the next allocation.  Used by the TrueType       */
+/* loader so per-glyph cs4 pointers stored during the registration loop     */
+/* keep pointing at the same arena block.                                   */
+static int svg_glyph_arena_reserve(svg_glyph_font *f, size_t extra)
+{
+  size_t want = f->arena_used + extra;
+  if( want <= f->arena_cap ) return 1;
+  { size_t newcap = f->arena_cap ? f->arena_cap : 16384;
+    unsigned char *p;
+    while( newcap < want ) newcap *= 2;
+    p = (unsigned char *) realloc(f->arena, newcap);
+    if( p == NULL ) return 0;
+    f->arena = p;
+    f->arena_cap = newcap;
+    return 1;
+  }
 }
 
 
@@ -741,10 +835,15 @@ static int svg_glyph_find_pfb_path(const char *ps_name, char *out, size_t cap)
 /*                                                                           */
 /*****************************************************************************/
 
-/* Forward declarations for the CFF/OTF loader (full body lives below the   */
-/* Type 1 charstring interpreter).                                           */
+/* Forward declarations for the CFF/OTF + TrueType loaders (full bodies     */
+/* live below the Type 1 charstring interpreter).                            */
+struct svg_glyph_emit_ctx;
 static int svg_glyph_find_otf_path(const char *ps_name, char *out, size_t cap);
 static int svg_glyph_load_otf(svg_glyph_font *f, const char *path);
+static int svg_glyph_find_ttf_path(const char *ps_name, char *out, size_t cap);
+static int svg_glyph_load_ttf(svg_glyph_font *f, const char *path);
+static int svg_glyph_run_ttf(struct svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  int gid, int depth);
 
 static int svg_glyph_load_font(const char *ps_name)
 {
@@ -817,6 +916,22 @@ static int svg_glyph_load_font(const char *ps_name)
     if( svg_glyph_load_otf(f, path) && f->nglyphs > 0 )
     {
       f->kind   = SVG_GLYPH_KIND_CFF;
+      f->loaded = 1;
+      return svg_glyph_n_fonts - 1;
+    }
+  }
+
+  /* (c) Fall through to TrueType .ttf.                                      */
+  if( svg_glyph_find_ttf_path(ps_name, path, sizeof path) )
+  {
+    /* Reset any partial state from prior failed attempts.                   */
+    f->nglyphs    = 0;
+    f->nsubrs     = 0;
+    f->ngsubrs    = 0;
+    f->arena_used = 0;
+    if( svg_glyph_load_ttf(f, path) && f->nglyphs > 0 )
+    {
+      f->kind   = SVG_GLYPH_KIND_TTF;
       f->loaded = 1;
       return svg_glyph_n_fonts - 1;
     }
@@ -1286,6 +1401,21 @@ int svg_glyph_emit_outline(
 
   if( f->kind == SVG_GLYPH_KIND_CFF )
     r = svg_glyph_run_cff_cs(&ctx, f, g->cs, g->cs_len);
+  else if( f->kind == SVG_GLYPH_KIND_TTF )
+  {
+    /* TrueType per-glyph: the `cs` slot holds a 4-byte little-endian       */
+    /* glyph index, dereferenced via the in-arena glyf data + loca offsets */
+    /* inside svg_glyph_run_ttf.                                            */
+    int gid;
+    if( g->cs_len != 4 || g->cs == NULL ) return 0;
+    gid = (int) ((unsigned int) g->cs[0]
+                | ((unsigned int) g->cs[1] <<  8)
+                | ((unsigned int) g->cs[2] << 16)
+                | ((unsigned int) g->cs[3] << 24));
+    r = svg_glyph_run_ttf((struct svg_glyph_emit_ctx *) &ctx, f, gid, 0);
+    /* TrueType outlines carry an implicit final closepath.                  */
+    if( ctx.close && !ctx.abort ) ctx.close(ctx.user);
+  }
   else
     r = svg_glyph_run_cs(&ctx, f, g->cs, g->cs_len);
   (void) r;
@@ -1298,12 +1428,12 @@ int svg_glyph_emit_outline(
 
 /*****************************************************************************/
 /*                                                                           */
-/*  CFF / OpenType outline loader.                                            */
+/*  CFF / OpenType outline loader (OTTO-tagged container only).             */
 /*                                                                           */
-/*  Phase 1 supports CFF-based OpenType (OTTO magic) with Type 2 charstring  */
-/*  outlines.  Phase 1 does NOT support TrueType `glyf` outlines (magic     */
-/*  0x00010000); when those are encountered the loader returns 0 and the    */
-/*  caller falls back to the bbox approximation.                             */
+/*  TrueType `glyf` outlines (sfnt magic 0x00010000) are handled by the    */
+/*  separate svg_glyph_load_ttf loader near the bottom of this file; the   */
+/*  load-font dispatcher in svg_glyph_load_font tries .pfb, .otf, then    */
+/*  .ttf in turn.                                                            */
 /*                                                                           */
 /*  Reference: Adobe Technical Note #5176 ("Compact Font Format             */
 /*  Specification") and #5177 ("Type 2 Charstring Format").                  */
@@ -2673,3 +2803,1091 @@ static int svg_glyph_run_cff_cs(svg_glyph_emit_ctx *c, svg_glyph_font *f,
   if( c->close && !c->abort ) c->close(c->user);
   return r;
 }
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  TrueType (`glyf` table) outline support.                                 */
+/*                                                                           */
+/*  Reference: Apple TrueType Reference Manual / Microsoft OpenType `glyf`. */
+/*                                                                           */
+/*  Format detection: the leading 4-byte sfnt magic is 0x00010000.  We      */
+/*  share the OT table directory walk with the CFF code path but accept    */
+/*  this alternative magic in svg_glyph_parse_tt_dir below.                  */
+/*                                                                           */
+/*  Glyph naming: the back end calls us with Adobe glyph names ("A", "a",  */
+/*  "exclam", ...).  We walk the TTF cmap (format 4 for BMP, format 12     */
+/*  for supplementary planes) to build a Unicode-codepoint -> GID array,   */
+/*  then use a static reverse-AGL table to translate the names we know     */
+/*  about into codepoints.  Names not in our reverse-AGL table fall back   */
+/*  to the .notdef rectangle (handled upstream by the bbox path).          */
+/*                                                                           */
+/*****************************************************************************/
+
+/* Reverse Adobe Glyph List entries we care about.  Mirrors the forward    */
+/* table in svg_ascii_glyph_name (z53.c) so charpath consumers find every  */
+/* glyph the PS source can request.                                        */
+typedef struct {
+  const char    *name;
+  unsigned int   cp;
+} svg_glyph_agl_rev;
+
+static const svg_glyph_agl_rev svg_glyph_agl_rev_table[] = {
+  /* ASCII letters and digits handled via fast-path in name->cp below.      */
+  { "space",         0x0020 }, { "exclam",        0x0021 },
+  { "quotedbl",      0x0022 }, { "numbersign",    0x0023 },
+  { "dollar",        0x0024 }, { "percent",       0x0025 },
+  { "ampersand",     0x0026 }, { "quoteright",    0x2019 },
+  { "parenleft",     0x0028 }, { "parenright",    0x0029 },
+  { "asterisk",      0x002a }, { "plus",          0x002b },
+  { "comma",         0x002c }, { "hyphen",        0x002d },
+  { "period",        0x002e }, { "slash",         0x002f },
+  { "colon",         0x003a }, { "semicolon",     0x003b },
+  { "less",          0x003c }, { "equal",         0x003d },
+  { "greater",       0x003e }, { "question",      0x003f },
+  { "at",            0x0040 }, { "bracketleft",   0x005b },
+  { "backslash",     0x005c }, { "bracketright",  0x005d },
+  { "asciicircum",   0x005e }, { "underscore",    0x005f },
+  { "quoteleft",     0x2018 }, { "braceleft",     0x007b },
+  { "bar",           0x007c }, { "braceright",    0x007d },
+  { "asciitilde",    0x007e },
+  /* Accents (used by seac and by @Graph callers).                          */
+  { "grave",         0x0060 }, { "acute",         0x00b4 },
+  { "circumflex",    0x02c6 }, { "tilde",         0x02dc },
+  { "macron",        0x00af }, { "breve",         0x02d8 },
+  { "dotaccent",     0x02d9 }, { "dieresis",      0x00a8 },
+  { "ring",          0x02da }, { "cedilla",       0x00b8 },
+  { "hungarumlaut",  0x02dd }, { "ogonek",        0x02db },
+  { "caron",         0x02c7 },
+  /* Common punctuation/quotation mark variants.                            */
+  { "endash",        0x2013 }, { "emdash",        0x2014 },
+  { "bullet",        0x2022 }, { "quotedblleft",  0x201c },
+  { "quotedblright", 0x201d }, { "quotesinglbase",0x201a },
+  { "quotedblbase",  0x201e }, { "ellipsis",      0x2026 },
+  { "dagger",        0x2020 }, { "daggerdbl",     0x2021 },
+  { "perthousand",   0x2030 }, { "questiondown",  0x00bf },
+  { "exclamdown",    0x00a1 },
+  { NULL,            0 }
+};
+
+/*****************************************************************************/
+/*  TrueType-flavoured OT table directory parser.  Returns table offsets    */
+/*  via out-params; missing tables set offset=0.  Accepts the 0x00010000    */
+/*  (Apple sfnt) and 'true' (NeXT) and 'typ1' (legacy) magics.              */
+/*****************************************************************************/
+
+typedef struct {
+  size_t        off;
+  size_t        len;
+} svg_glyph_tt_table;
+
+typedef struct {
+  svg_glyph_tt_table head, maxp, loca, glyf, cmap, hhea, hmtx, post;
+  int               units_per_em;
+  int               index_to_loc_format;  /* 0=short, 1=long                */
+} svg_glyph_tt_dir;
+
+static int svg_glyph_parse_tt_dir(const unsigned char *buf, size_t buf_len,
+  svg_glyph_tt_dir *out)
+{
+  unsigned long magic;
+  unsigned int n_tables;
+  size_t pos;
+  unsigned int i;
+
+  memset(out, 0, sizeof *out);
+  out->units_per_em = 1000;
+  if( buf_len < 12 ) return 0;
+  magic = svg_glyph_be_u32(buf);
+  /* 0x00010000 = TrueType sfnt; 'true' = legacy Apple; 'typ1' = legacy.     */
+  if( magic != 0x00010000UL &&
+      magic != 0x74727565UL &&   /* 'true' */
+      magic != 0x74797031UL )    /* 'typ1' */
+    return 0;
+  n_tables = svg_glyph_be_u16(buf + 4);
+  if( n_tables == 0 ) return 0;
+  pos = 12;
+  if( pos + (size_t) n_tables * 16 > buf_len ) return 0;
+  for( i = 0; i < n_tables; i++ )
+  {
+    const unsigned char *rec = buf + pos + (size_t) i * 16;
+    unsigned long tag    = svg_glyph_be_u32(rec);
+    unsigned long offset = svg_glyph_be_u32(rec + 8);
+    unsigned long length = svg_glyph_be_u32(rec + 12);
+    if( (size_t) offset > buf_len ||
+        (size_t) offset + length > buf_len ) continue;
+    switch( tag )
+    {
+      case 0x68656164UL: /* 'head' */
+        out->head.off = (size_t) offset; out->head.len = (size_t) length;
+        if( length >= 54 )
+        { unsigned int upem;
+          int itlf;
+          upem = svg_glyph_be_u16(buf + (size_t) offset + 18);
+          if( upem > 0 ) out->units_per_em = (int) upem;
+          itlf = (int) svg_glyph_be_u16(buf + (size_t) offset + 50);
+          out->index_to_loc_format = (itlf != 0) ? 1 : 0;
+        }
+        break;
+      case 0x6d617870UL: /* 'maxp' */
+        out->maxp.off = (size_t) offset; out->maxp.len = (size_t) length;
+        break;
+      case 0x6c6f6361UL: /* 'loca' */
+        out->loca.off = (size_t) offset; out->loca.len = (size_t) length;
+        break;
+      case 0x676c7966UL: /* 'glyf' */
+        out->glyf.off = (size_t) offset; out->glyf.len = (size_t) length;
+        break;
+      case 0x636d6170UL: /* 'cmap' */
+        out->cmap.off = (size_t) offset; out->cmap.len = (size_t) length;
+        break;
+      case 0x68686561UL: /* 'hhea' */
+        out->hhea.off = (size_t) offset; out->hhea.len = (size_t) length;
+        break;
+      case 0x686d7478UL: /* 'hmtx' */
+        out->hmtx.off = (size_t) offset; out->hmtx.len = (size_t) length;
+        break;
+      case 0x706f7374UL: /* 'post' */
+        out->post.off = (size_t) offset; out->post.len = (size_t) length;
+        break;
+      default:
+        break;
+    }
+  }
+  return out->head.off != 0 && out->maxp.off != 0 &&
+         out->loca.off != 0 && out->glyf.off != 0 &&
+         out->cmap.off != 0;
+}
+
+
+/*****************************************************************************/
+/*  cmap parser.  Walks the encoding-record table for the highest-priority  */
+/*  Unicode subtable we recognise (preferring format 12 over format 4).     */
+/*  Fills cp_to_gid[cp] for every codepoint in [0, 0x10000) covered by the */
+/*  selected subtable; the caller supplies an array sized 0x10000 (BMP).    */
+/*****************************************************************************/
+
+static int svg_glyph_parse_cmap(const unsigned char *buf, size_t buf_len,
+  size_t cmap_off, size_t cmap_len,
+  unsigned short *cp_to_gid /* sized 0x10000 */)
+{
+  unsigned int n_sub;
+  unsigned int i;
+  size_t best_off = 0;
+  int best_fmt = -1;
+  int found_unicode = 0;
+
+  if( cmap_off + 4 > buf_len ) return 0;
+  if( cmap_len < 4 ) return 0;
+  n_sub = svg_glyph_be_u16(buf + cmap_off + 2);
+  if( cmap_off + 4 + n_sub * 8 > buf_len ) return 0;
+
+  /* First pass: pick the best encoding record.  Format-12 BMP+supp-Unicode  */
+  /* > Format-4 Unicode BMP > Format-4 Windows BMP.                          */
+  for( i = 0; i < n_sub; i++ )
+  {
+    const unsigned char *rec = buf + cmap_off + 4 + (size_t) i * 8;
+    unsigned int platform_id = svg_glyph_be_u16(rec);
+    unsigned int encoding_id = svg_glyph_be_u16(rec + 2);
+    unsigned long sub_off    = svg_glyph_be_u32(rec + 4);
+    size_t fmt_pos;
+    unsigned int fmt;
+    int is_unicode_bmp = 0;
+    int is_unicode_full = 0;
+    if( cmap_off + (size_t) sub_off + 2 > buf_len ) continue;
+    fmt_pos = cmap_off + (size_t) sub_off;
+    fmt = svg_glyph_be_u16(buf + fmt_pos);
+    /* Unicode platform = 0; Microsoft = 3, Symbol = 3/0, UCS-2 = 3/1,      */
+    /* UCS-4 = 3/10.                                                         */
+    if( platform_id == 0 ) is_unicode_bmp = 1;
+    if( platform_id == 0 && (encoding_id == 4 || encoding_id == 6) )
+      is_unicode_full = 1;
+    if( platform_id == 3 && encoding_id == 1 ) is_unicode_bmp = 1;
+    if( platform_id == 3 && encoding_id == 10 ) is_unicode_full = 1;
+    if( !is_unicode_bmp && !is_unicode_full ) continue;
+    found_unicode = 1;
+    /* Score: format 12 (full Unicode) outranks format 4 (BMP).              */
+    if( fmt == 12 && best_fmt < 12 )
+    { best_fmt = 12; best_off = fmt_pos; }
+    else if( fmt == 4 && best_fmt < 4 )
+    { best_fmt = 4; best_off = fmt_pos; }
+  }
+  (void) found_unicode;
+  if( best_fmt < 0 ) return 0;
+
+  memset(cp_to_gid, 0, 0x10000 * sizeof *cp_to_gid);
+
+  if( best_fmt == 4 )
+  {
+    unsigned int seg_count_x2;
+    unsigned int seg_count;
+    size_t end_off, start_off, delta_off, range_off;
+    unsigned int seg;
+    size_t length;
+    if( best_off + 14 > buf_len ) return 0;
+    length = svg_glyph_be_u16(buf + best_off + 2);
+    if( best_off + length > buf_len ) length = buf_len - best_off;
+    seg_count_x2 = svg_glyph_be_u16(buf + best_off + 6);
+    seg_count    = seg_count_x2 / 2;
+    if( seg_count == 0 || seg_count > 16384 ) return 0;
+    end_off   = best_off + 14;
+    start_off = end_off + seg_count_x2 + 2;
+    delta_off = start_off + seg_count_x2;
+    range_off = delta_off + seg_count_x2;
+    if( range_off + seg_count_x2 > buf_len ) return 0;
+    for( seg = 0; seg < seg_count; seg++ )
+    {
+      unsigned int end_code   = svg_glyph_be_u16(buf + end_off   + seg * 2);
+      unsigned int start_code = svg_glyph_be_u16(buf + start_off + seg * 2);
+      int          id_delta   = (int) svg_glyph_be_u16(buf + delta_off + seg * 2);
+      unsigned int id_range   = svg_glyph_be_u16(buf + range_off + seg * 2);
+      unsigned int cp;
+      /* id_delta is technically int16, ensure sign-extended.                 */
+      if( id_delta >= 0x8000 ) id_delta -= 0x10000;
+      if( start_code == 0xffff && end_code == 0xffff ) break;
+      for( cp = start_code; cp <= end_code && cp <= 0xffff; cp++ )
+      {
+        unsigned int gid;
+        if( id_range == 0 )
+        { gid = (cp + (unsigned int) id_delta) & 0xffff; }
+        else
+        {
+          /* idRangeOffset semantics: address = &idRangeOffset[seg] +       */
+          /*   idRangeOffset[seg] + 2*(cp - startCode).                      */
+          size_t addr = range_off + seg * 2
+                      + id_range
+                      + 2 * (size_t) (cp - start_code);
+          if( addr + 2 > buf_len ) { gid = 0; }
+          else
+          { gid = svg_glyph_be_u16(buf + addr);
+            if( gid != 0 ) gid = (gid + (unsigned int) id_delta) & 0xffff;
+          }
+        }
+        if( gid != 0 ) cp_to_gid[cp] = (unsigned short) gid;
+        if( cp == 0xffff ) break;
+      }
+    }
+    return 1;
+  }
+  if( best_fmt == 12 )
+  {
+    unsigned long n_groups;
+    unsigned long g;
+    size_t groups_off;
+    if( best_off + 16 > buf_len ) return 0;
+    n_groups   = svg_glyph_be_u32(buf + best_off + 12);
+    if( n_groups > 1000000UL ) return 0;
+    groups_off = best_off + 16;
+    if( groups_off + n_groups * 12 > buf_len ) return 0;
+    for( g = 0; g < n_groups; g++ )
+    {
+      const unsigned char *rec = buf + groups_off + (size_t) g * 12;
+      unsigned long start_cp = svg_glyph_be_u32(rec);
+      unsigned long end_cp   = svg_glyph_be_u32(rec + 4);
+      unsigned long start_gid= svg_glyph_be_u32(rec + 8);
+      unsigned long cp;
+      if( start_cp > 0xffff ) continue;   /* BMP only for now                */
+      if( end_cp > 0xffff ) end_cp = 0xffff;
+      for( cp = start_cp; cp <= end_cp; cp++ )
+      {
+        unsigned long gid = start_gid + (cp - start_cp);
+        if( gid > 0xffff ) gid = 0;
+        cp_to_gid[cp] = (unsigned short) gid;
+      }
+    }
+    return 1;
+  }
+  return 0;
+}
+
+
+/*****************************************************************************/
+/*  Parse the `loca` table into a u32 offsets array (n_glyphs+1 entries).   */
+/*  Caller frees the returned malloc'd array.                                */
+/*****************************************************************************/
+
+static unsigned long *svg_glyph_parse_loca(const unsigned char *buf,
+  size_t buf_len, const svg_glyph_tt_dir *dir, int n_glyphs)
+{
+  unsigned long *out;
+  int i;
+  size_t need;
+  if( n_glyphs <= 0 || n_glyphs >= SVG_GLYPH_TTF_MAX_GLYPHS ) return NULL;
+  out = (unsigned long *) malloc(sizeof *out * (size_t) (n_glyphs + 1));
+  if( out == NULL ) return NULL;
+  if( dir->index_to_loc_format == 0 )
+  {
+    need = (size_t) (n_glyphs + 1) * 2;
+    if( dir->loca.off + need > buf_len ) { free(out); return NULL; }
+    for( i = 0; i <= n_glyphs; i++ )
+      out[i] = (unsigned long) svg_glyph_be_u16(
+        buf + dir->loca.off + (size_t) i * 2) * 2UL;
+  }
+  else
+  {
+    need = (size_t) (n_glyphs + 1) * 4;
+    if( dir->loca.off + need > buf_len ) { free(out); return NULL; }
+    for( i = 0; i <= n_glyphs; i++ )
+      out[i] = svg_glyph_be_u32(buf + dir->loca.off + (size_t) i * 4);
+  }
+  return out;
+}
+
+
+/*****************************************************************************/
+/*                                                                           */
+/*  glyf record decoder.  Walks one simple glyph's contour data and emits   */
+/*  via the supplied move/line/curve/close callbacks (with a quadratic ->   */
+/*  cubic conversion since the BACK_END interface advertises cubics).       */
+/*  Composite glyphs recurse into svg_glyph_run_ttf with the supplied      */
+/*  translation; affine 2x2 matrices are honoured if present.               */
+/*                                                                           */
+/*****************************************************************************/
+
+/* glyf simple flags.                                                        */
+#define SVG_TTF_FLG_ON_CURVE  0x01
+#define SVG_TTF_FLG_XSHORT    0x02
+#define SVG_TTF_FLG_YSHORT    0x04
+#define SVG_TTF_FLG_REPEAT    0x08
+#define SVG_TTF_FLG_XSAMEPOS  0x10
+#define SVG_TTF_FLG_YSAMEPOS  0x20
+
+/* glyf composite flags.                                                     */
+#define SVG_TTF_CF_ARG_WORDS    0x0001
+#define SVG_TTF_CF_ARGS_XY      0x0002
+#define SVG_TTF_CF_HAVE_SCALE   0x0008
+#define SVG_TTF_CF_MORE_COMPS   0x0020
+#define SVG_TTF_CF_HAVE_XY_SC   0x0040
+#define SVG_TTF_CF_HAVE_TWO_X_2 0x0080
+#define SVG_TTF_CF_INSTR        0x0100
+
+/* The path-emission transform is a 2x2 matrix [a b; c d] + translation     */
+/* (tx, ty), applied as (x', y') = (a*x + c*y + tx, b*x + d*y + ty).        */
+typedef struct {
+  double a, b, c, d;
+  double tx, ty;
+} svg_glyph_ttf_xform;
+
+static double svg_glyph_ttf_2d14(int v)
+{
+  if( v >= 0x8000 ) v -= 0x10000;
+  return (double) v / 16384.0;
+}
+
+static void svg_glyph_ttf_apply(const svg_glyph_ttf_xform *x,
+  double xi, double yi, double *xo, double *yo)
+{
+  *xo = x->a * xi + x->c * yi + x->tx;
+  *yo = x->b * xi + x->d * yi + x->ty;
+}
+
+/* Identity transform helper.                                                */
+static void svg_glyph_ttf_identity(svg_glyph_ttf_xform *x)
+{
+  x->a = 1.0; x->b = 0.0; x->c = 0.0; x->d = 1.0;
+  x->tx = 0.0; x->ty = 0.0;
+}
+
+/* Forward: simple-glyph emit.                                               */
+static int svg_glyph_emit_simple(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  const unsigned char *gd, size_t gd_len,
+  int n_contours, const svg_glyph_ttf_xform *xf);
+
+/* Forward: composite-glyph emit.                                            */
+static int svg_glyph_emit_composite(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  const unsigned char *gd, size_t gd_len, int depth,
+  const svg_glyph_ttf_xform *xf);
+
+
+static int svg_glyph_run_ttf(struct svg_glyph_emit_ctx *c_arg,
+  svg_glyph_font *f, int gid, int depth)
+{
+  svg_glyph_emit_ctx *c = (svg_glyph_emit_ctx *) c_arg;
+  unsigned long g_start, g_end;
+  size_t gd_len;
+  const unsigned char *gd;
+  int n_contours;
+  svg_glyph_ttf_xform xf;
+
+  if( depth > SVG_GLYPH_TTF_RECURSE ) return 0;
+  if( gid < 0 || gid >= f->ttf_n_glyphs ) return 0;
+  if( f->arena == NULL ) return 0;
+  {
+    unsigned long *glyf_off_p =
+      (unsigned long *) (f->arena + f->glyf_off_arena_off);
+    g_start = glyf_off_p[gid];
+    g_end   = glyf_off_p[gid + 1];
+  }
+  if( g_end <= g_start ) return 1;     /* empty glyph -- legitimate         */
+  if( (size_t) g_end > f->glyf_len ) return 0;
+  gd_len = (size_t) (g_end - g_start);
+  if( gd_len < 10 ) return 0;
+  gd = f->arena + f->glyf_arena_off + g_start;
+  n_contours = (int) (signed short) svg_glyph_be_u16(gd);
+  svg_glyph_ttf_identity(&xf);
+  if( n_contours >= 0 )
+    return svg_glyph_emit_simple(c, f, gd, gd_len, n_contours, &xf);
+  return svg_glyph_emit_composite(c, f, gd, gd_len, depth, &xf);
+}
+
+
+/* Plot a single point (in design units) through xform and the emit ctx     */
+/* scale/origin.                                                             */
+static void svg_glyph_ttf_move(svg_glyph_emit_ctx *c,
+  const svg_glyph_ttf_xform *xf, double x, double y)
+{
+  double xt, yt;
+  svg_glyph_ttf_apply(xf, x, y, &xt, &yt);
+  if( c->move ) c->move(c->user,
+    c->x0 + xt * c->scale, c->y0 + yt * c->scale);
+}
+
+static void svg_glyph_ttf_line(svg_glyph_emit_ctx *c,
+  const svg_glyph_ttf_xform *xf, double x, double y)
+{
+  double xt, yt;
+  svg_glyph_ttf_apply(xf, x, y, &xt, &yt);
+  if( c->line ) c->line(c->user,
+    c->x0 + xt * c->scale, c->y0 + yt * c->scale);
+}
+
+/* Emit a quadratic bezier as an equivalent cubic.  P0 is the implicit      */
+/* current point passed in by the caller (xp0, yp0).                        */
+static void svg_glyph_ttf_quad(svg_glyph_emit_ctx *c,
+  const svg_glyph_ttf_xform *xf,
+  double xp0, double yp0, double xq, double yq, double xp1, double yp1)
+{
+  double c1x = xp0 + 2.0 / 3.0 * (xq - xp0);
+  double c1y = yp0 + 2.0 / 3.0 * (yq - yp0);
+  double c2x = xp1 + 2.0 / 3.0 * (xq - xp1);
+  double c2y = yp1 + 2.0 / 3.0 * (yq - yp1);
+  double X1, Y1, X2, Y2, X3, Y3;
+  svg_glyph_ttf_apply(xf, c1x, c1y, &X1, &Y1);
+  svg_glyph_ttf_apply(xf, c2x, c2y, &X2, &Y2);
+  svg_glyph_ttf_apply(xf, xp1, yp1, &X3, &Y3);
+  if( c->curve ) c->curve(c->user,
+    c->x0 + X1 * c->scale, c->y0 + Y1 * c->scale,
+    c->x0 + X2 * c->scale, c->y0 + Y2 * c->scale,
+    c->x0 + X3 * c->scale, c->y0 + Y3 * c->scale);
+}
+
+
+static int svg_glyph_emit_simple(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  const unsigned char *gd, size_t gd_len,
+  int n_contours, const svg_glyph_ttf_xform *xf)
+{
+  size_t pos;
+  unsigned int n_points;
+  unsigned int instr_len;
+  unsigned int i;
+  unsigned short *end_pts = NULL;
+  unsigned char  *flags   = NULL;
+  double         *xs      = NULL;
+  double         *ys      = NULL;
+  unsigned char  *oncurve = NULL;
+  int             contour;
+  int             ok = 0;
+
+  (void) f;
+  if( n_contours == 0 ) return 1;
+  if( n_contours > 4096 ) return 0;
+  /* Header: i16 ncont + 4*i16 bbox = 10 bytes.                              */
+  pos = 10;
+  if( pos + (size_t) n_contours * 2 + 2 > gd_len ) return 0;
+  end_pts = (unsigned short *) malloc(sizeof *end_pts * (size_t) n_contours);
+  if( end_pts == NULL ) return 0;
+  for( i = 0; i < (unsigned int) n_contours; i++ )
+  {
+    end_pts[i] = (unsigned short) svg_glyph_be_u16(gd + pos);
+    pos += 2;
+  }
+  n_points = end_pts[n_contours - 1] + 1;
+  if( n_points == 0 || n_points > 8192 ) { free(end_pts); return 0; }
+  instr_len = svg_glyph_be_u16(gd + pos); pos += 2;
+  if( pos + instr_len > gd_len ) { free(end_pts); return 0; }
+  pos += instr_len;     /* skip hinting instructions                         */
+
+  flags   = (unsigned char *)  malloc((size_t) n_points);
+  xs      = (double *)         malloc(sizeof *xs * (size_t) n_points);
+  ys      = (double *)         malloc(sizeof *ys * (size_t) n_points);
+  oncurve = (unsigned char *)  malloc((size_t) n_points);
+  if( flags == NULL || xs == NULL || ys == NULL || oncurve == NULL )
+    goto cleanup;
+
+  /* Decode flags (with repeat-byte expansion).                              */
+  {
+    unsigned int k = 0;
+    while( k < n_points )
+    {
+      unsigned char fl;
+      if( pos + 1 > gd_len ) goto cleanup;
+      fl = gd[pos++];
+      flags[k] = fl;
+      oncurve[k] = (unsigned char) ((fl & SVG_TTF_FLG_ON_CURVE) ? 1 : 0);
+      k++;
+      if( fl & SVG_TTF_FLG_REPEAT )
+      {
+        unsigned int rep;
+        if( pos + 1 > gd_len ) goto cleanup;
+        rep = gd[pos++];
+        while( rep > 0 && k < n_points )
+        { flags[k] = fl;
+          oncurve[k] = (unsigned char) ((fl & SVG_TTF_FLG_ON_CURVE) ? 1 : 0);
+          k++;
+          rep--;
+        }
+      }
+    }
+  }
+
+  /* Decode X coords (deltas).                                               */
+  {
+    double cur = 0.0;
+    unsigned int k;
+    for( k = 0; k < n_points; k++ )
+    {
+      unsigned char fl = flags[k];
+      if( fl & SVG_TTF_FLG_XSHORT )
+      { int v;
+        if( pos + 1 > gd_len ) goto cleanup;
+        v = (int) gd[pos++];
+        if( !(fl & SVG_TTF_FLG_XSAMEPOS) ) v = -v;
+        cur += (double) v;
+      }
+      else if( !(fl & SVG_TTF_FLG_XSAMEPOS) )
+      { int v;
+        if( pos + 2 > gd_len ) goto cleanup;
+        v = (int) (signed short) svg_glyph_be_u16(gd + pos);
+        pos += 2;
+        cur += (double) v;
+      }
+      /* else: x same as previous -- delta is zero.                          */
+      xs[k] = cur;
+    }
+  }
+
+  /* Decode Y coords (deltas).                                               */
+  {
+    double cur = 0.0;
+    unsigned int k;
+    for( k = 0; k < n_points; k++ )
+    {
+      unsigned char fl = flags[k];
+      if( fl & SVG_TTF_FLG_YSHORT )
+      { int v;
+        if( pos + 1 > gd_len ) goto cleanup;
+        v = (int) gd[pos++];
+        if( !(fl & SVG_TTF_FLG_YSAMEPOS) ) v = -v;
+        cur += (double) v;
+      }
+      else if( !(fl & SVG_TTF_FLG_YSAMEPOS) )
+      { int v;
+        if( pos + 2 > gd_len ) goto cleanup;
+        v = (int) (signed short) svg_glyph_be_u16(gd + pos);
+        pos += 2;
+        cur += (double) v;
+      }
+      ys[k] = cur;
+    }
+  }
+
+  /* Walk each contour and emit.  In TT, both endpoints of a contour can     */
+  /* be off-curve, in which case an implicit on-curve point sits at their   */
+  /* midpoint; the same rule applies between any two consecutive off-      */
+  /* curves.  We materialise these implicit points into a local extended    */
+  /* point list per contour and then walk it normally.                      */
+  {
+    int start = 0;
+    for( contour = 0; contour < n_contours; contour++ )
+    {
+      int end = end_pts[contour];
+      int len_c = end - start + 1;
+      int ext_cap = len_c * 2 + 2;
+      double *ex = NULL, *ey = NULL;
+      unsigned char *eo = NULL;
+      int ne = 0;
+      int j;
+      double sx, sy;
+      double prev_x, prev_y;
+      if( len_c <= 0 ) { start = end + 1; continue; }
+      ex = (double *) malloc(sizeof *ex * (size_t) ext_cap);
+      ey = (double *) malloc(sizeof *ey * (size_t) ext_cap);
+      eo = (unsigned char *) malloc((size_t) ext_cap);
+      if( ex == NULL || ey == NULL || eo == NULL )
+      { free(ex); free(ey); free(eo); goto cleanup; }
+      /* Step 1: synthesise the start point.  If point[start] is off-      */
+      /* curve, the contour's start is the midpoint of the last and first */
+      /* points (or just the first if both endpoints are on-curve).        */
+      if( !oncurve[start] && !oncurve[end] )
+      { sx = 0.5 * (xs[start] + xs[end]);
+        sy = 0.5 * (ys[start] + ys[end]);
+        ex[ne] = sx; ey[ne] = sy; eo[ne] = 1; ne++;
+      }
+      else if( !oncurve[start] && oncurve[end] )
+      { sx = xs[end]; sy = ys[end];
+        ex[ne] = sx; ey[ne] = sy; eo[ne] = 1; ne++;
+      }
+      else
+      { sx = xs[start]; sy = ys[start];
+        ex[ne] = sx; ey[ne] = sy; eo[ne] = 1; ne++;
+      }
+      /* Step 2: append remaining points, inserting implicit midpoints     */
+      /* between two consecutive off-curve points.                         */
+      for( j = (oncurve[start] ? start + 1 : start);
+           j <= end; j++ )
+      {
+        if( ne > 1 && eo[ne-1] == 0 && oncurve[j] == 0 )
+        {
+          /* implicit on-curve midpoint                                    */
+          double mx = 0.5 * (ex[ne-1] + xs[j]);
+          double my = 0.5 * (ey[ne-1] + ys[j]);
+          ex[ne] = mx; ey[ne] = my; eo[ne] = 1; ne++;
+        }
+        if( ne >= ext_cap )
+        { /* grow */
+          int new_cap = ext_cap * 2;
+          double *nx = (double *) realloc(ex, sizeof *nx * (size_t) new_cap);
+          double *ny = (double *) realloc(ey, sizeof *ny * (size_t) new_cap);
+          unsigned char *no =
+            (unsigned char *) realloc(eo, (size_t) new_cap);
+          if( nx == NULL || ny == NULL || no == NULL )
+          { free(nx ? nx : ex); free(ny ? ny : ey); free(no ? no : eo);
+            goto cleanup; }
+          ex = nx; ey = ny; eo = no; ext_cap = new_cap;
+        }
+        ex[ne] = xs[j]; ey[ne] = ys[j];
+        eo[ne] = (unsigned char) (oncurve[j] ? 1 : 0);
+        ne++;
+      }
+
+      /* Step 3: emit MoveTo to first on-curve point, then walk.            */
+      svg_glyph_ttf_move(c, xf, ex[0], ey[0]);
+      prev_x = ex[0];  prev_y = ey[0];
+      j = 1;
+      while( j < ne )
+      {
+        if( eo[j] )                  /* on-curve -> straight line          */
+        {
+          svg_glyph_ttf_line(c, xf, ex[j], ey[j]);
+          prev_x = ex[j]; prev_y = ey[j];
+          j++;
+        }
+        else                          /* off-curve -> quadratic            */
+        {
+          double qx = ex[j], qy = ey[j];
+          double tx, ty;
+          if( j + 1 < ne )
+          { tx = ex[j+1]; ty = ey[j+1]; }
+          else
+          /* End of extended list -- close back onto start with a quad.    */
+          { tx = ex[0]; ty = ey[0]; }
+          svg_glyph_ttf_quad(c, xf, prev_x, prev_y, qx, qy, tx, ty);
+          prev_x = tx; prev_y = ty;
+          j += 2;
+        }
+      }
+      /* TT contours implicitly close back to the first on-curve point.    */
+      if( c->close ) c->close(c->user);
+      free(ex); free(ey); free(eo);
+      start = end + 1;
+    }
+  }
+  ok = 1;
+
+cleanup:
+  free(end_pts);
+  free(flags);
+  free(xs);
+  free(ys);
+  free(oncurve);
+  return ok;
+}
+
+
+static int svg_glyph_emit_composite(svg_glyph_emit_ctx *c, svg_glyph_font *f,
+  const unsigned char *gd, size_t gd_len, int depth,
+  const svg_glyph_ttf_xform *parent_xf)
+{
+  size_t pos = 10;       /* skip header                                     */
+  unsigned int flags;
+  int more = 1;
+  int last_had_instr = 0;
+  while( more )
+  {
+    unsigned int sub_gid;
+    int arg1, arg2;
+    svg_glyph_ttf_xform xf;
+    /* Per-Microsoft spec: components are 16-bit aligned packets.            */
+    if( pos + 4 > gd_len ) return 0;
+    flags   = svg_glyph_be_u16(gd + pos);     pos += 2;
+    sub_gid = svg_glyph_be_u16(gd + pos);     pos += 2;
+    if( flags & SVG_TTF_CF_ARG_WORDS )
+    {
+      if( pos + 4 > gd_len ) return 0;
+      arg1 = (int) (signed short) svg_glyph_be_u16(gd + pos); pos += 2;
+      arg2 = (int) (signed short) svg_glyph_be_u16(gd + pos); pos += 2;
+    }
+    else
+    {
+      if( pos + 2 > gd_len ) return 0;
+      arg1 = (int) (signed char) gd[pos++];
+      arg2 = (int) (signed char) gd[pos++];
+    }
+    /* Build the per-component transform.                                    */
+    svg_glyph_ttf_identity(&xf);
+    if( flags & SVG_TTF_CF_HAVE_SCALE )
+    {
+      if( pos + 2 > gd_len ) return 0;
+      { double s = svg_glyph_ttf_2d14(
+          (int) svg_glyph_be_u16(gd + pos)); pos += 2;
+        xf.a = s; xf.d = s; }
+    }
+    else if( flags & SVG_TTF_CF_HAVE_XY_SC )
+    {
+      if( pos + 4 > gd_len ) return 0;
+      xf.a = svg_glyph_ttf_2d14((int) svg_glyph_be_u16(gd + pos)); pos += 2;
+      xf.d = svg_glyph_ttf_2d14((int) svg_glyph_be_u16(gd + pos)); pos += 2;
+    }
+    else if( flags & SVG_TTF_CF_HAVE_TWO_X_2 )
+    {
+      if( pos + 8 > gd_len ) return 0;
+      xf.a = svg_glyph_ttf_2d14((int) svg_glyph_be_u16(gd + pos)); pos += 2;
+      xf.b = svg_glyph_ttf_2d14((int) svg_glyph_be_u16(gd + pos)); pos += 2;
+      xf.c = svg_glyph_ttf_2d14((int) svg_glyph_be_u16(gd + pos)); pos += 2;
+      xf.d = svg_glyph_ttf_2d14((int) svg_glyph_be_u16(gd + pos)); pos += 2;
+    }
+    /* Translation (only the ARGS_ARE_XY_VALUES interpretation; the "match  */
+    /* points" alternative is rare in real fonts and we treat it as zero    */
+    /* translation if not explicitly XY values).                            */
+    if( flags & SVG_TTF_CF_ARGS_XY )
+    { xf.tx = (double) arg1; xf.ty = (double) arg2; }
+
+    /* Compose with parent transform: child first, then parent.              */
+    { svg_glyph_ttf_xform composed;
+      composed.a  = parent_xf->a * xf.a + parent_xf->c * xf.b;
+      composed.b  = parent_xf->b * xf.a + parent_xf->d * xf.b;
+      composed.c  = parent_xf->a * xf.c + parent_xf->c * xf.d;
+      composed.d  = parent_xf->b * xf.c + parent_xf->d * xf.d;
+      composed.tx = parent_xf->a * xf.tx + parent_xf->c * xf.ty
+                  + parent_xf->tx;
+      composed.ty = parent_xf->b * xf.tx + parent_xf->d * xf.ty
+                  + parent_xf->ty;
+      /* Recurse: parse the referenced glyph with the composed transform.    */
+      if( (int) sub_gid < f->ttf_n_glyphs )
+      {
+        unsigned long *glyf_off_p =
+          (unsigned long *) (f->arena + f->glyf_off_arena_off);
+        unsigned long g_start = glyf_off_p[sub_gid];
+        unsigned long g_end   = glyf_off_p[sub_gid + 1];
+        if( g_end > g_start && (size_t) g_end <= f->glyf_len )
+        {
+          const unsigned char *sgd =
+            f->arena + f->glyf_arena_off + g_start;
+          size_t sgd_len = (size_t) (g_end - g_start);
+          if( sgd_len >= 10 )
+          {
+            int sn = (int) (signed short) svg_glyph_be_u16(sgd);
+            if( sn >= 0 )
+              svg_glyph_emit_simple(c, f, sgd, sgd_len, sn, &composed);
+            else if( depth + 1 <= SVG_GLYPH_TTF_RECURSE )
+              svg_glyph_emit_composite(c, f, sgd, sgd_len,
+                                       depth + 1, &composed);
+          }
+        }
+      }
+    }
+    last_had_instr = (flags & SVG_TTF_CF_INSTR) ? 1 : 0;
+    more = (flags & SVG_TTF_CF_MORE_COMPS) ? 1 : 0;
+  }
+  /* If the composite carries hinting instructions, they follow the last    */
+  /* component (u16 instructionLength + instructions[]).  We skip them.    */
+  (void) last_had_instr;
+  return 1;
+}
+
+
+/*****************************************************************************/
+/*  Top-level TrueType loader.                                              */
+/*****************************************************************************/
+
+static int svg_glyph_load_ttf(svg_glyph_font *f, const char *path)
+{
+  FILE *fp;
+  long fsize;
+  unsigned char *raw = NULL;
+  size_t got;
+  svg_glyph_tt_dir dir;
+  int n_glyphs;
+  unsigned long *loca_arr = NULL;
+  unsigned short *cp_to_gid = NULL;
+  unsigned char *glyf_arena = NULL;
+  int upem;
+
+  fp = fopen(path, "rb");
+  if( fp == NULL ) return 0;
+  fseek(fp, 0L, SEEK_END);
+  fsize = ftell(fp);
+  fseek(fp, 0L, SEEK_SET);
+  if( fsize <= 12 || fsize > SVG_GLYPH_OTF_MAX )
+  { fclose(fp); return 0; }
+  raw = (unsigned char *) malloc((size_t) fsize);
+  if( raw == NULL ) { fclose(fp); return 0; }
+  got = fread(raw, 1, (size_t) fsize, fp);
+  fclose(fp);
+  if( got != (size_t) fsize ) { free(raw); return 0; }
+
+  if( !svg_glyph_parse_tt_dir(raw, (size_t) fsize, &dir) )
+  { free(raw); return 0; }
+  upem = dir.units_per_em;
+  if( dir.maxp.len < 6 ) { free(raw); return 0; }
+  n_glyphs = (int) svg_glyph_be_u16(raw + dir.maxp.off + 4);
+  if( n_glyphs <= 0 || n_glyphs >= SVG_GLYPH_TTF_MAX_GLYPHS )
+  { free(raw); return 0; }
+
+  loca_arr = svg_glyph_parse_loca(raw, (size_t) fsize, &dir, n_glyphs);
+  if( loca_arr == NULL ) { free(raw); return 0; }
+
+  cp_to_gid = (unsigned short *) calloc(0x10000, sizeof *cp_to_gid);
+  if( cp_to_gid == NULL )
+  { free(loca_arr); free(raw); return 0; }
+  if( !svg_glyph_parse_cmap(raw, (size_t) fsize,
+        dir.cmap.off, dir.cmap.len, cp_to_gid) )
+  { free(cp_to_gid); free(loca_arr); free(raw); return 0; }
+
+  /* Copy the glyf table into the arena so it outlives `raw`, then store    */
+  /* the loca offsets array (also in the arena) for the runtime decoder.   */
+  /* We track these by *offset* into the arena, not pointer, because the   */
+  /* arena's realloc can move the underlying buffer when later cs4 slots   */
+  /* are allocated and any stored pointers would dangle.                   */
+  f->glyf_arena_off = f->arena_used;
+  glyf_arena = svg_glyph_arena_alloc(f, dir.glyf.len);
+  if( glyf_arena == NULL )
+  { free(cp_to_gid); free(loca_arr); free(raw); return 0; }
+  memcpy(glyf_arena, raw + dir.glyf.off, dir.glyf.len);
+  f->glyf_len     = dir.glyf.len;
+  f->ttf_n_glyphs = n_glyphs;
+
+  /* Persist the loca offsets array inside the arena too.                    */
+  {
+    size_t need = sizeof(unsigned long) * (size_t) (n_glyphs + 1);
+    unsigned char *off_arena;
+    f->glyf_off_arena_off = f->arena_used;
+    off_arena = svg_glyph_arena_alloc(f, need);
+    if( off_arena == NULL )
+    { free(cp_to_gid); free(loca_arr); free(raw); return 0; }
+    memcpy(off_arena, loca_arr, need);
+  }
+
+  /* Build per-name glyph entries.  We walk the reverse AGL table plus the  */
+  /* ASCII fast-path range, look up each codepoint, and create an entry    */
+  /* per resolved GID.  The cs slot holds a 4-byte little-endian GID.      */
+  /*                                                                        */
+  /* Reserve enough arena capacity upfront so the cs4 pointers we store    */
+  /* through this loop don't get invalidated by a mid-loop realloc.        */
+  {
+    int reserve_count = 26 + 26 + 10;
+    int rt;
+    for( rt = 0; svg_glyph_agl_rev_table[rt].name != NULL; rt++ )
+      reserve_count++;
+    if( !svg_glyph_arena_reserve(f, (size_t) reserve_count * 4) )
+    { free(cp_to_gid); free(loca_arr); free(raw); return 0; }
+  }
+  f->nglyphs = 0;
+
+  /* Helper inline-pattern: register one name -> gid pair into glyphs[].    */
+  /* Implemented as nested block to avoid mid-block decls.                  */
+  {
+    int reg;
+    unsigned int cp;
+    const char *nm;
+    int idx;
+    unsigned int gid;
+    /* ASCII letters/digits.                                                 */
+    for( reg = 0; reg < 26; reg++ )
+    {
+      char buf[2];
+      buf[0] = (char) ('A' + reg); buf[1] = 0;
+      cp = (unsigned int) buf[0];
+      gid = cp_to_gid[cp];
+      if( gid == 0 ) continue;
+      if( f->nglyphs >= SVG_GLYPH_MAX_GLYPHS ) break;
+      idx = f->nglyphs++;
+      f->glyphs[idx].name[0] = buf[0]; f->glyphs[idx].name[1] = 0;
+      { unsigned char *cs4 = svg_glyph_arena_alloc(f, 4);
+        if( cs4 == NULL ) break;
+        cs4[0] = (unsigned char) (gid & 0xff);
+        cs4[1] = (unsigned char) ((gid >> 8) & 0xff);
+        cs4[2] = 0; cs4[3] = 0;
+        f->glyphs[idx].cs = cs4; f->glyphs[idx].cs_len = 4; }
+    }
+    for( reg = 0; reg < 26; reg++ )
+    {
+      char buf[2];
+      buf[0] = (char) ('a' + reg); buf[1] = 0;
+      cp = (unsigned int) buf[0];
+      gid = cp_to_gid[cp];
+      if( gid == 0 ) continue;
+      if( f->nglyphs >= SVG_GLYPH_MAX_GLYPHS ) break;
+      idx = f->nglyphs++;
+      f->glyphs[idx].name[0] = buf[0]; f->glyphs[idx].name[1] = 0;
+      { unsigned char *cs4 = svg_glyph_arena_alloc(f, 4);
+        if( cs4 == NULL ) break;
+        cs4[0] = (unsigned char) (gid & 0xff);
+        cs4[1] = (unsigned char) ((gid >> 8) & 0xff);
+        cs4[2] = 0; cs4[3] = 0;
+        f->glyphs[idx].cs = cs4; f->glyphs[idx].cs_len = 4; }
+    }
+    {
+      static const char *digit_names[10] = {
+        "zero","one","two","three","four",
+        "five","six","seven","eight","nine"
+      };
+      for( reg = 0; reg < 10; reg++ )
+      {
+        cp = (unsigned int) ('0' + reg);
+        gid = cp_to_gid[cp];
+        if( gid == 0 ) continue;
+        if( f->nglyphs >= SVG_GLYPH_MAX_GLYPHS ) break;
+        idx = f->nglyphs++;
+        nm = digit_names[reg];
+        { size_t L = strlen(nm);
+          if( L >= SVG_GLYPH_NAME_LEN ) L = SVG_GLYPH_NAME_LEN - 1;
+          memcpy(f->glyphs[idx].name, nm, L);
+          f->glyphs[idx].name[L] = 0; }
+        { unsigned char *cs4 = svg_glyph_arena_alloc(f, 4);
+          if( cs4 == NULL ) break;
+          cs4[0] = (unsigned char) (gid & 0xff);
+          cs4[1] = (unsigned char) ((gid >> 8) & 0xff);
+          cs4[2] = 0; cs4[3] = 0;
+          f->glyphs[idx].cs = cs4; f->glyphs[idx].cs_len = 4; }
+      }
+    }
+    /* Named entries from svg_glyph_agl_rev_table.                           */
+    for( reg = 0; svg_glyph_agl_rev_table[reg].name != NULL; reg++ )
+    {
+      cp = svg_glyph_agl_rev_table[reg].cp;
+      if( cp >= 0x10000 ) continue;
+      gid = cp_to_gid[cp];
+      if( gid == 0 ) continue;
+      if( f->nglyphs >= SVG_GLYPH_MAX_GLYPHS ) break;
+      idx = f->nglyphs++;
+      nm = svg_glyph_agl_rev_table[reg].name;
+      { size_t L = strlen(nm);
+        if( L >= SVG_GLYPH_NAME_LEN ) L = SVG_GLYPH_NAME_LEN - 1;
+        memcpy(f->glyphs[idx].name, nm, L);
+        f->glyphs[idx].name[L] = 0; }
+      { unsigned char *cs4 = svg_glyph_arena_alloc(f, 4);
+        if( cs4 == NULL ) break;
+        cs4[0] = (unsigned char) (gid & 0xff);
+        cs4[1] = (unsigned char) ((gid >> 8) & 0xff);
+        cs4[2] = 0; cs4[3] = 0;
+        f->glyphs[idx].cs = cs4; f->glyphs[idx].cs_len = 4; }
+    }
+  }
+
+  /* em_scale: design-units -> 1000-em (matches CFF convention).             */
+  if( upem > 0 && upem != 1000 )
+    f->em_scale = 1000.0 / (double) upem;
+  else
+    f->em_scale = 1.0;
+
+  free(cp_to_gid);
+  free(loca_arr);
+  free(raw);
+  return f->nglyphs > 0;
+}
+
+
+/*****************************************************************************/
+/*  .ttf file probe + search.                                                */
+/*****************************************************************************/
+
+static int svg_glyph_ttf_probe(const char *path)
+{
+  FILE *fp = fopen(path, "rb");
+  unsigned char magic[4];
+  size_t n;
+  unsigned long m;
+  if( fp == NULL ) return 0;
+  n = fread(magic, 1, 4, fp);
+  fclose(fp);
+  if( n != 4 ) return 0;
+  m = ((unsigned long) magic[0] << 24) | ((unsigned long) magic[1] << 16)
+    | ((unsigned long) magic[2] <<  8) |  (unsigned long) magic[3];
+  return (m == 0x00010000UL || m == 0x74727565UL || m == 0x74797031UL);
+}
+
+static int svg_glyph_try_ttf_dir(const char *dir, const char *name,
+  char *out, size_t cap)
+{
+  size_t dl, nl;
+  if( dir == NULL || name == NULL ) return 0;
+  dl = strlen(dir);
+  nl = strlen(name);
+  if( dl + 1 + nl + 1 > cap ) return 0;
+  memcpy(out, dir, dl);
+  if( dl > 0 && out[dl-1] != '/' ) out[dl++] = '/';
+  memcpy(out + dl, name, nl + 1);
+  return svg_glyph_ttf_probe(out);
+}
+
+static int svg_glyph_try_ttf_dir_recursive(const char *dir, const char *name,
+  char *out, size_t cap)
+{
+  if( svg_glyph_try_ttf_dir(dir, name, out, cap) ) return 1;
+  {
+    static const char *subs[] = {
+      "dejavu/","liberation/","liberation2/","noto/","ttf-dejavu/",
+      "msttcorefonts/","freefont/","ubuntu/","cabin/","croscore/",
+      "open-sans/","roboto/","lato/","crosextra/","lyx/","ttf-bitstream-vera/",
+      NULL
+    };
+    int i;
+    char joined[512];
+    for( i = 0; subs[i] != NULL; i++ )
+    {
+      size_t dl = strlen(dir);
+      size_t sl = strlen(subs[i]);
+      if( dl + sl + 1 > sizeof joined ) continue;
+      memcpy(joined, dir, dl);
+      if( dl > 0 && joined[dl-1] != '/' ) joined[dl++] = '/';
+      memcpy(joined + dl, subs[i], sl + 1);
+      if( svg_glyph_try_ttf_dir(joined, name, out, cap) ) return 1;
+    }
+  }
+  return 0;
+}
+
+static int svg_glyph_find_ttf_path(const char *ps_name, char *out, size_t cap)
+{
+  const char *override;
+  const char *file = NULL;
+  char namebuf[SVG_GLYPH_PSN_LEN + 8];
+  int i;
+
+  for( i = 0; svg_glyph_ttf_map[i].ps_name != NULL; i++ )
+    if( strcmp(svg_glyph_ttf_map[i].ps_name, ps_name) == 0 )
+    { file = svg_glyph_ttf_map[i].file; break; }
+  if( file == NULL )
+  { size_t pl = strlen(ps_name);
+    if( pl + 4 + 1 > sizeof namebuf ) return 0;
+    memcpy(namebuf, ps_name, pl);
+    memcpy(namebuf + pl, ".ttf", 5);
+    file = namebuf;
+  }
+
+  override = getenv("LOUT_TTF_FONT_DIR");
+  if( override != NULL && override[0] != 0 )
+    if( svg_glyph_try_ttf_dir_recursive(override, file, out, cap) ) return 1;
+  /* LOUT_T1_FONT_DIR doubles as a TTF override too -- the user task spec   */
+  /* exercises this on the DejaVu directory.                                */
+  override = getenv("LOUT_T1_FONT_DIR");
+  if( override != NULL && override[0] != 0 )
+    if( svg_glyph_try_ttf_dir_recursive(override, file, out, cap) ) return 1;
+  for( i = 0; svg_glyph_ttf_dir[i] != NULL; i++ )
+    if( svg_glyph_try_ttf_dir_recursive(svg_glyph_ttf_dir[i], file, out, cap) )
+      return 1;
+  return 0;
+}
+
+
