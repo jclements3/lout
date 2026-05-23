@@ -168,8 +168,8 @@ def @SVG right @Body
 #                                                                         #
 #   In SVG mode: reads the file at the given path and inlines its         #
 #   contents (expected to be an <svg>...</svg> root element).  We use     #
-#   @IncludeGraphicFile, which causes the back-end PrintGraphicInclude    #
-#   callback to copy the file verbatim to the output.                     #
+#   @IncludeGraphic, whose back-end implementation (z53.c's              #
+#   SVG_PrintGraphicInclude) copies the SVG/PNG/JPG payload verbatim.     #
 #   In any other back-end: emits a placeholder note.                      #
 #                                                                         #
 ###########################################################################
