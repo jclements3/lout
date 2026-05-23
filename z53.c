@@ -236,6 +236,12 @@ static void svg_lig_cache_clear(void);
 static void svg_kern_tables_clear(void);
 static short *svg_kern_table_for(FONT_NUM fnum, FULL_CHAR *unacc_map);
 
+/* Forward decl: per-build cache of decoded glyph paths (defined alongside    */
+/* svg_emit_word_paths).  Reset in SVG_PrintInitialize and freed in           */
+/* SVG_PrintAfterLastPage for the same reason as the kern tables: pointer-    */
+/* identity on ps_name/glyph_name is only valid within a single build.        */
+static void svg_glyph_path_cache_clear(void);
+
 /* Forward decl: monotonic counter for <path id="textpath-N"> defs emitted   */
 /* by the textPath emitter.  Defined alongside g_psstate further down; the  */
 /* declaration is hoisted here so SVG_PrintInitialize can reset it.          */
@@ -371,6 +377,7 @@ static void SVG_PrintInitialize(FILE *fp, BOOLEAN enc)
   svg_face_cache_clear();
   svg_lig_cache_clear();
   svg_kern_tables_clear();
+  svg_glyph_path_cache_clear();
   /* Reset the textPath def-id counter so two consecutive document builds  */
   /* in the same process produce identical SVG output.                     */
   svg_textpath_id_next = 0;
@@ -1705,6 +1712,79 @@ static int svg_word_has_substitution(const char *ps_name,
   return 0;
 }
 
+/* Per-glyph path cache.  Profiling smcp-heavy documents (LOUT_SVG_FONT_   */
+/* FEATURES=smcp,onum) showed svg_glyph_run_cs -- the Type 2 charstring   */
+/* interpreter inside z53_glyph.c -- consuming ~40 % of wall time, with   */
+/* every glyph re-decoded on every appearance even though typical docs    */
+/* hit only a few hundred unique (font, gid, size) triples versus tens of */
+/* thousands of emissions.  Decoding once and caching the resulting       */
+/* SVG d-attribute string flips the smcp build from ~5x baseline to       */
+/* ~1.3x.  The cache key uses pointer-equality on ps_name (Lout-owned,    */
+/* lifetime spans the whole build) and glyph_name (a static literal      */
+/* returned by svg_ascii_glyph_name -- never freed), so no strcmp needed. */
+/* Cache d-strings are decoded with x0=0; on emit the caller's cx_pt     */
+/* becomes a `transform="translate(cx,0)"` attribute, which is free      */
+/* when cx_pt is 0 (the first glyph in every word).                       */
+#define SVG_GLYPH_CACHE_SIZE 512
+typedef struct svg_glyph_cache_entry {
+  const char    *ps_name;    /* NULL -> slot unused                        */
+  const char    *glyph_name; /* NULL when keyed by gid                     */
+  unsigned int   gid;        /* 0 when keyed by glyph_name                 */
+  double         size_pt;
+  double         advance;
+  char          *d;          /* heap; NULL means "decode failed, skip"     */
+  int            d_len;
+  unsigned int   touched;    /* LRU counter, 0 means evictable             */
+} svg_glyph_cache_entry;
+
+static svg_glyph_cache_entry svg_glyph_path_cache[SVG_GLYPH_CACHE_SIZE];
+static unsigned int          svg_glyph_path_cache_clock = 0;
+
+static void svg_glyph_path_cache_clear(void)
+{
+  int i;
+  for( i = 0; i < SVG_GLYPH_CACHE_SIZE; i++ )
+  {
+    if( svg_glyph_path_cache[i].d != NULL )
+      free(svg_glyph_path_cache[i].d);
+    svg_glyph_path_cache[i].ps_name    = NULL;
+    svg_glyph_path_cache[i].glyph_name = NULL;
+    svg_glyph_path_cache[i].gid        = 0;
+    svg_glyph_path_cache[i].size_pt    = 0.0;
+    svg_glyph_path_cache[i].advance    = 0.0;
+    svg_glyph_path_cache[i].d          = NULL;
+    svg_glyph_path_cache[i].d_len      = 0;
+    svg_glyph_path_cache[i].touched    = 0;
+  }
+  svg_glyph_path_cache_clock = 0;
+}
+
+/* Find the cache slot for (ps_name, gid, glyph_name, size_pt), or the    */
+/* oldest unused slot for insertion.  Pointer-equality on ps_name and    */
+/* glyph_name is sound because both are long-lived static / Lout-owned   */
+/* strings whose addresses don't change during a build.                   */
+static svg_glyph_cache_entry *svg_glyph_path_cache_lookup(
+  const char *ps_name, unsigned int gid, const char *glyph_name,
+  double size_pt)
+{
+  int i;
+  int victim = 0;
+  unsigned int victim_touched = (unsigned int) -1;
+  for( i = 0; i < SVG_GLYPH_CACHE_SIZE; i++ )
+  {
+    svg_glyph_cache_entry *e = &svg_glyph_path_cache[i];
+    if( e->ps_name == ps_name && e->gid == gid &&
+        e->glyph_name == glyph_name && e->size_pt == size_pt )
+      return e;
+    if( e->touched < victim_touched )
+    {
+      victim = i;
+      victim_touched = e->touched;
+    }
+  }
+  return &svg_glyph_path_cache[victim];
+}
+
 /* Emit one glyph's outline as a <path>.  fill_str is the SVG fill colour. */
 /* Returns the glyph's actual advance in pt (0 if the outline couldn't be */
 /* emitted -- caller may fall back to an estimated advance).               */
@@ -1712,44 +1792,89 @@ static double svg_emit_one_glyph_path(const char *ps_name,
   unsigned int gid, const char *glyph_name,
   double font_size_pt, double cx_pt, const char *fill_str)
 {
-  static char path_buf[SVG_GLYPH_PATH_BUF_SIZE];
-  svg_path_emit_ctx ctx;
-  double advance = 0.0;
-  int ok;
+  svg_glyph_cache_entry *slot;
 
-  ctx.buf = path_buf;
-  ctx.cap = SVG_GLYPH_PATH_BUF_SIZE;
-  ctx.len = 0;
-  ctx.has_geom = 0;
-  path_buf[0] = '\0';
-
-  if( gid != 0 )
+  if( ps_name == NULL ) return 0.0;
+  slot = svg_glyph_path_cache_lookup(ps_name, gid, glyph_name, font_size_pt);
+  if( !(slot->ps_name == ps_name && slot->gid == gid &&
+        slot->glyph_name == glyph_name && slot->size_pt == font_size_pt) )
   {
-    ok = svg_glyph_emit_outline_gid(ps_name, gid, font_size_pt,
-      cx_pt, 0.0, &advance, (void *) &ctx,
-      svg_path_cb_move, svg_path_cb_line,
-      svg_path_cb_curve, svg_path_cb_close);
+    /* Cache miss: decode the glyph at x0=0 into a heap buffer, store it. */
+    static char path_buf[SVG_GLYPH_PATH_BUF_SIZE];
+    svg_path_emit_ctx ctx;
+    double advance = 0.0;
+    int ok;
+
+    ctx.buf = path_buf;
+    ctx.cap = SVG_GLYPH_PATH_BUF_SIZE;
+    ctx.len = 0;
+    ctx.has_geom = 0;
+    path_buf[0] = '\0';
+
+    if( gid != 0 )
+      ok = svg_glyph_emit_outline_gid(ps_name, gid, font_size_pt,
+        0.0, 0.0, &advance, (void *) &ctx,
+        svg_path_cb_move, svg_path_cb_line,
+        svg_path_cb_curve, svg_path_cb_close);
+    else if( glyph_name != NULL )
+      ok = svg_glyph_emit_outline(ps_name, glyph_name, font_size_pt,
+        0.0, 0.0, &advance, (void *) &ctx,
+        svg_path_cb_move, svg_path_cb_line,
+        svg_path_cb_curve, svg_path_cb_close);
+    else
+      ok = 0;
+
+    /* Replace any previous content of the victim slot, success or fail.  */
+    if( slot->d != NULL ) { free(slot->d); slot->d = NULL; }
+    slot->ps_name    = ps_name;
+    slot->gid        = gid;
+    slot->glyph_name = glyph_name;
+    slot->size_pt    = font_size_pt;
+    slot->advance    = (ok && ctx.len > 0) ? advance : 0.0;
+    slot->d_len      = 0;
+    if( ok && ctx.len > 0 )
+    {
+      char *buf = (char *) malloc((size_t) ctx.len + 1);
+      if( buf != NULL )
+      {
+        memcpy(buf, path_buf, (size_t) ctx.len);
+        buf[ctx.len] = '\0';
+        slot->d     = buf;
+        slot->d_len = ctx.len;
+      }
+    }
   }
-  else if( glyph_name != NULL )
+
+  slot->touched = ++svg_glyph_path_cache_clock;
+  if( slot->d == NULL || slot->d_len == 0 ) return 0.0;
+
+  /* Emit.  When cx_pt is exactly zero (every word's first glyph) skip the */
+  /* translate-attribute entirely; otherwise write a single combined       */
+  /* "<path transform=\"translate(N,0)\" ..." opening.                     */
+  if( cx_pt == 0.0 )
   {
-    ok = svg_glyph_emit_outline(ps_name, glyph_name, font_size_pt,
-      cx_pt, 0.0, &advance, (void *) &ctx,
-      svg_path_cb_move, svg_path_cb_line,
-      svg_path_cb_curve, svg_path_cb_close);
+    fputs("<path d=\"", out_fp);
+    fwrite(slot->d, 1, (size_t) slot->d_len, out_fp);
+    fputs("\" fill=\"", out_fp);
+    fputs(fill_str, out_fp);
+    fputs("\"/>", out_fp);
   }
   else
-    ok = 0;
-
-  if( !ok || ctx.len == 0 ) return 0.0;
-  /* Null-terminate.  svg_path_buf_putc keeps one byte of slack.            */
-  path_buf[ctx.len] = '\0';
-
-  fputs("<path d=\"", out_fp);
-  fwrite(path_buf, 1, (size_t) ctx.len, out_fp);
-  fputs("\" fill=\"", out_fp);
-  fputs(fill_str, out_fp);
-  fputs("\"/>", out_fp);
-  return advance;
+  {
+    char hdr[64];
+    char *p = hdr;
+    const char *q = "<path transform=\"translate(";
+    while( *q != '\0' ) *p++ = *q++;
+    p += svg_ftoa3(cx_pt, p);
+    q = ")\" d=\"";
+    while( *q != '\0' ) *p++ = *q++;
+    fwrite(hdr, 1, (size_t) (p - hdr), out_fp);
+    fwrite(slot->d, 1, (size_t) slot->d_len, out_fp);
+    fputs("\" fill=\"", out_fp);
+    fputs(fill_str, out_fp);
+    fputs("\"/>", out_fp);
+  }
+  return slot->advance;
 }
 
 /* Emit a word as <path> outlines instead of <text>.  Caller arranges the */
@@ -1846,6 +1971,8 @@ static void SVG_PrintAfterLastPage(void)
   /* test harness) call SVG_PrintInitialize, which also clears, so this is  */
   /* a belt-and-braces free for the final document only.                   */
   svg_kern_tables_clear();
+  /* Same belt-and-braces for the per-glyph path cache.                    */
+  svg_glyph_path_cache_clear();
   /* Flush the 128 KB out_fp buffer set in SVG_PrintInitialize so the file  */
   /* is fully committed before Lout proper exits (some callers rely on the */
   /* file being readable immediately after lout returns).                  */
